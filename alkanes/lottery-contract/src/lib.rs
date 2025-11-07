@@ -1,0 +1,1056 @@
+use alkanes_runtime::{
+    declare_alkane, message::MessageDispatch, runtime::AlkaneResponder, storage::StoragePointer,
+};
+
+#[allow(unused_imports)]
+use alkanes_runtime::{
+    println,
+    stdio::{stdout, Write},
+};
+use alkanes_std_factory_support::MintableToken;
+use alkanes_support::{
+    cellpack::Cellpack,
+    checked_expr,
+    context::Context,
+    id::AlkaneId,
+    parcel::{AlkaneTransfer, AlkaneTransferParcel},
+    response::CallResponse,
+    utils::{overflow_error, shift, shift_or_err},
+};
+use anyhow::{anyhow, Result};
+use bitcoin::{Block, BlockHash};
+use metashrew_support::compat::to_arraybuffer_layout;
+use metashrew_support::{index_pointer::KeyValuePointer, utils::consume_u128};
+use protorune_support::balance_sheet::{BalanceSheetOperations, CachedBalanceSheet};
+use protorune_support::utils::consensus_decode;
+use std::{cmp::min, sync::Arc};
+use alkanes_macros::{storage_variable, mapping_variable};
+
+// User struct matching Solidity version
+#[derive(Clone, Default)]
+pub struct User {
+    pub tickets_purchased_total_bps: u128,
+    pub winnings_claimable: u128,
+    pub active: bool,
+}
+
+impl User {
+    fn from_bytes(v: Vec<u8>) -> Self {
+        if v.len() < 33 {
+            return User::default();
+        }
+        let mut offset = 0;
+        let tickets_purchased_total_bps = u128::from_le_bytes(
+            v[offset..offset + 16].try_into().unwrap_or([0u8; 16])
+        );
+        offset += 16;
+        let winnings_claimable = u128::from_le_bytes(
+            v[offset..offset + 16].try_into().unwrap_or([0u8; 16])
+        );
+        offset += 16;
+        let active = v.get(offset).copied().unwrap_or(0) != 0;
+        User {
+            tickets_purchased_total_bps,
+            winnings_claimable,
+            active,
+        }
+    }
+
+    fn try_to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&self.tickets_purchased_total_bps.to_le_bytes());
+        bytes.extend_from_slice(&self.winnings_claimable.to_le_bytes());
+        bytes.push(if self.active { 1 } else { 0 });
+        bytes
+    }
+
+    fn maximum() -> Self {
+        User {
+            tickets_purchased_total_bps: u128::MAX,
+            winnings_claimable: u128::MAX,
+            active: true,
+        }
+    }
+
+    fn zero() -> Self {
+        User::default()
+    }
+}
+
+// LP struct matching Solidity version
+#[derive(Clone, Default)]
+pub struct LP {
+    pub principal: u128,
+    pub stake: u128,
+    pub risk_percentage: u128,
+    pub active: bool,
+}
+
+impl LP {
+    fn from_bytes(v: Vec<u8>) -> Self {
+        if v.len() < 49 {
+            return LP::default();
+        }
+        let mut offset = 0;
+        let principal = u128::from_le_bytes(
+            v[offset..offset + 16].try_into().unwrap_or([0u8; 16])
+        );
+        offset += 16;
+        let stake = u128::from_le_bytes(
+            v[offset..offset + 16].try_into().unwrap_or([0u8; 16])
+        );
+        offset += 16;
+        let risk_percentage = u128::from_le_bytes(
+            v[offset..offset + 16].try_into().unwrap_or([0u8; 16])
+        );
+        offset += 16;
+        let active = v.get(offset).copied().unwrap_or(0) != 0;
+        LP {
+            principal,
+            stake,
+            risk_percentage,
+            active,
+        }
+    }
+
+    fn try_to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&self.principal.to_le_bytes());
+        bytes.extend_from_slice(&self.stake.to_le_bytes());
+        bytes.extend_from_slice(&self.risk_percentage.to_le_bytes());
+        bytes.push(if self.active { 1 } else { 0 });
+        bytes
+    }
+
+    fn maximum() -> Self {
+        LP {
+            principal: u128::MAX,
+            stake: u128::MAX,
+            risk_percentage: 100,
+            active: true,
+        }
+    }
+
+    fn zero() -> Self {
+        LP::default()
+    }
+}
+
+#[derive(MessageDispatch)]
+pub enum LotteryContractMessage {
+    #[opcode(0)]
+    Initialize {
+        token_id: AlkaneId,
+        ticket_price: u128, // price of single ticket in token
+    },
+    // #[opcode(1)]
+    // LpDeposit { risk_percentage: u128 },
+    // #[opcode(2)]
+    // LpAdjustRiskPercentage { risk_percentage: u128 },
+    // #[opcode(3)]
+    // PurchaseTickets,
+    // #[opcode(4)]
+    // RunJackpot,
+    // #[opcode(5)]
+    // WithdrawWinnings,
+    // #[opcode(6)]
+    // WithdrawReferralFees,
+    // #[opcode(7)]
+    // WithdrawProtocolFees,
+    // #[opcode(8)]
+    // WithdrawAllLP,
+    
+    // // Admin functions
+    // #[opcode(20)]
+    // SetTicketPrice { new_price: u128 },
+    // #[opcode(21)]
+    // SetRoundDurationInSeconds { duration: u128 },
+    // #[opcode(22)]
+    // SetReferralFeeBps { bps: u128 },
+    // #[opcode(23)]
+    // SetFeeBps { bps: u128 },
+    // #[opcode(24)]
+    // SetLpPoolCap { cap: u128 },
+    // #[opcode(25)]
+    // SetProtocolFee { fee: u128 },
+    // #[opcode(26)]
+    // SetProtocolFeeThreshold { threshold: u128 },
+    // #[opcode(27)]
+    // ForceReleaseJackpotLock,
+    // #[opcode(29)]
+    // SetLpLimit { limit: u128 },
+    // #[opcode(30)]
+    // SetUserLimit { limit: u128 },
+    // #[opcode(31)]
+    // SetMinLpDeposit { min_deposit: u128 },
+    // #[opcode(32)]
+    // SetAllowPurchasing { allow: bool },
+
+    // #[opcode(99)]
+    // #[returns(String)]
+    // GetName,
+}
+
+#[derive(Default)]
+pub struct LotteryContract();
+
+impl MintableToken for LotteryContract {}
+impl AlkaneResponder for LotteryContract {}
+
+impl LotteryContract {
+    storage_variable!(token: AlkaneId);
+    storage_variable!(fee_bps: u128);
+    storage_variable!(ticket_price: u128);
+    storage_variable!(round_duration_in_blocks: u128);
+    storage_variable!(last_jackpot_end_block: u128);
+    storage_variable!(lp_pool_total: u128);
+    storage_variable!(lp_pool_cap: u128);
+    storage_variable!(user_pool_total: u128);
+    storage_variable!(ticket_count_total_bps: u128);
+    storage_variable!(last_winner_id: AlkaneId);
+    storage_variable!(jackpot_lock: u128);
+    storage_variable!(all_fees_total: u128);
+    storage_variable!(lp_fees_total: u128);
+    storage_variable!(protocol_fee_claimable: u128);
+    storage_variable!(lp_limit: u128);
+    storage_variable!(min_lp_deposit: u128);
+    storage_variable!(user_limit: u128);
+    storage_variable!(allow_purchasing: u128);
+
+    // Helper functions for User storage
+    // mapping_variable!(User, "/user/");
+
+    // Helper functions for active user addresses array
+    // fn active_user_addresses_pointer(&self) -> StoragePointer {
+    //     StoragePointer::from_keyword("/active_user_addresses")
+    // }
+
+    // fn get_active_user_addresses(&self) -> Vec<AlkaneId> {
+    //     let ptr = self.active_user_addresses_pointer();
+    //     let bytes = ptr.get();
+    //     if bytes.is_empty() {
+    //         return Vec::new();
+    //     }
+    //     // Deserialize Vec<AlkaneId>
+    //     let mut addresses = Vec::new();
+    //     let mut offset = 0;
+    //     while offset + 32 <= bytes.len() {
+    //         let block = u128::from_le_bytes(
+    //             bytes[offset..offset + 16].try_into().unwrap_or([0u8; 16])
+    //         );
+    //         offset += 16;
+    //         let tx = u128::from_le_bytes(
+    //             bytes[offset..offset + 16].try_into().unwrap_or([0u8; 16])
+    //         );
+    //         offset += 16;
+    //         addresses.push(AlkaneId::new(block, tx));
+    //     }
+    //     addresses
+    // }
+
+    // fn set_active_user_addresses(&self, addresses: &Vec<AlkaneId>) {
+    //     let mut bytes = Vec::new();
+    //     for addr in addresses {
+    //         bytes.extend_from_slice(&addr.block.to_le_bytes());
+    //         bytes.extend_from_slice(&addr.tx.to_le_bytes());
+    //     }
+    //     self.active_user_addresses_pointer().set(Arc::new(bytes));
+    // }
+
+    // // Helper functions for active LP addresses array
+    // fn active_lp_addresses_pointer(&self) -> StoragePointer {
+    //     StoragePointer::from_keyword("/active_lp_addresses")
+    // }
+
+    // fn get_active_lp_addresses(&self) -> Vec<AlkaneId> {
+    //     let ptr = self.active_lp_addresses_pointer();
+    //     let bytes = ptr.get();
+    //     if bytes.is_empty() {
+    //         return Vec::new();
+    //     }
+    //     let mut addresses = Vec::new();
+    //     let mut offset = 0;
+    //     while offset + 32 <= bytes.len() {
+    //         let block = u128::from_le_bytes(
+    //             bytes[offset..offset + 16].try_into().unwrap_or([0u8; 16])
+    //         );
+    //         offset += 16;
+    //         let tx = u128::from_le_bytes(
+    //             bytes[offset..offset + 16].try_into().unwrap_or([0u8; 16])
+    //         );
+    //         offset += 16;
+    //         addresses.push(AlkaneId::new(block, tx));
+    //     }
+    //     addresses
+    // }
+
+    // fn set_active_lp_addresses(&self, addresses: &Vec<AlkaneId>) {
+    //     let mut bytes = Vec::new();
+    //     for addr in addresses {
+    //         bytes.extend_from_slice(&addr.block.to_le_bytes());
+    //         bytes.extend_from_slice(&addr.tx.to_le_bytes());
+    //     }
+    //     self.active_lp_addresses_pointer().set(Arc::new(bytes));
+    // }
+
+    // // Helper to get block timestamp
+    // fn block_timestamp(&self) -> Result<u32> {
+    //     Ok(self.block_header()?.time)
+    // }
+
+    // fn _refund_and_check_inputs(
+    //     &self,
+    //     desired_input_token: AlkaneId,
+    //     desired_input_amount: u128,
+    // ) -> Result<CallResponse> {
+    //     let context = self.context()?;
+    //     let mut token_received: u128 = 0;
+    //     let mut ret = CallResponse::default();
+    //     for alkane_transfer in context.incoming_alkanes.0.clone() {
+    //         if alkane_transfer.id != desired_input_token {
+    //             ret.alkanes.pay(alkane_transfer);
+    //         } else {
+    //             token_received += alkane_transfer.value;
+    //         }
+    //     }
+    //     if desired_input_amount > token_received {
+    //         return Err(anyhow!(format!(
+    //             "desired amount ({}) is greater than amount input ({})",
+    //             desired_input_amount, token_received
+    //         )));
+    //     }
+    //     ret.alkanes.pay(AlkaneTransfer {
+    //         id: desired_input_token,
+    //         value: token_received - desired_input_amount,
+    //     });
+    //     Ok(ret)
+    // }
+
+    // // Get token balance using BalanceSheetOperations
+    // fn get_token_balance(&self, address: &AlkaneId, token_id: &AlkaneId) -> u128 {
+    //     let context = match self.context() {
+    //         Ok(ctx) => ctx,
+    //         Err(_) => return 0,
+    //     };
+    //     let mut balance_sheet = CachedBalanceSheet::from_context(&context);
+    //     balance_sheet.get(&token_id.into())
+    // }
+
+    // // Transfer tokens
+    // fn transfer_tokens(&self, to: &AlkaneId, token_id: &AlkaneId, amount: u128) -> Result<CallResponse> {
+    //     let mut response = CallResponse::default();
+    //     response.alkanes.pay(AlkaneTransfer {
+    //         id: token_id.clone(),
+    //         value: amount,
+    //     });
+    //     Ok(response)
+    // }
+
+    fn initialize(&self, token_id: AlkaneId, ticket_price: u128) -> Result<CallResponse> {
+        self.observe_initialization()?;
+        let context = self.context()?;
+        self.set_token(token_id.clone());
+        self.set_name_and_symbol_str("Lottery LP".to_string(), "LTY LP".to_string());
+        
+        self.set_ticket_price(ticket_price);
+        
+        // Initialize default values
+        self.set_fee_bps(10u128); // 0.1%
+        self.set_round_duration_in_blocks(144u128); // 1 day
+        self.set_lp_limit(100u128);
+        self.set_user_limit(1500u128);
+        self.set_allow_purchasing(0u128); // false
+        self.set_last_jackpot_end_block(self.height() as u128);
+        
+        let min_lp_deposit = ticket_price * 100;
+        self.set_min_lp_deposit(min_lp_deposit);
+        self.set_lp_pool_cap(min_lp_deposit * 1000);
+        
+        Ok(CallResponse::forward(&context.incoming_alkanes))
+    }
+
+    // Helper functions for fee calculations
+    // fn calculate_fees(&self, used_amount: u128, referrer: Option<&AlkaneId>) -> (u128, u128, u128) {
+    //     let fee_bps = self.fee_bps_pointer().get_value::<u128>();
+    //     let referral_fee_bps = self.referral_fee_bps_pointer().get_value::<u128>();
+    //     let all_fee_amount = (used_amount * fee_bps) / 10000;
+    //     let referral_fee_amount = if referrer.is_some() {
+    //         (used_amount * referral_fee_bps) / 10000
+    //     } else {
+    //         0
+    //     };
+    //     let lp_fee_amount = all_fee_amount - referral_fee_amount;
+    //     (all_fee_amount, referral_fee_amount, lp_fee_amount)
+    // }
+
+    // fn update_fee_totals(&self, all_fee_amount: u128, referral_fee_amount: u128, lp_fee_amount: u128, referrer: Option<&AlkaneId>) {
+    //     let all_fees = self.all_fees_total_pointer().get_value::<u128>();
+    //     self.all_fees_total_pointer().set_value(all_fees + all_fee_amount);
+        
+    //     if let Some(ref_addr) = referrer {
+    //         let current = self.get_referral_fees_claimable(ref_addr);
+    //         self.set_referral_fees_claimable(ref_addr, current + referral_fee_amount);
+    //         let total = self.referral_fees_total_pointer().get_value::<u128>();
+    //         self.referral_fees_total_pointer().set_value(total + referral_fee_amount);
+    //     }
+        
+    //     let lp_fees = self.lp_fees_total_pointer().get_value::<u128>();
+    //     self.lp_fees_total_pointer().set_value(lp_fees + lp_fee_amount);
+    // }
+
+    // fn process_ticket_purchase(&self, actual_received: u128, user_address: &AlkaneId) -> Result<(u128, u128)> {
+    //     let ticket_price = self.ticket_price();
+    //     let ticket_count = actual_received / ticket_price;
+    //     if ticket_count == 0 {
+    //         return Err(anyhow!("Insufficient amount for minimum ticket purchase"));
+    //     }
+
+    //     let used_amount = ticket_count * ticket_price;
+    //     let fee_bps = self.fee_bps_pointer().get_value::<u128>();
+    //     let tickets_purchased_bps = ticket_count * (10000 - fee_bps);
+
+    //     let mut user = self.get_user(user_address);
+    //     if !user.active {
+    //         let active_users = self.get_active_user_addresses();
+    //         let user_limit = self.user_limit_pointer().get_value::<u128>();
+    //         if active_users.len() as u128 >= user_limit {
+    //             return Err(anyhow!("Max user limit reached"));
+    //         }
+    //         user.active = true;
+    //         let mut new_active = active_users;
+    //         new_active.push(user_address.clone());
+    //         self.set_active_user_addresses(&new_active);
+    //     }
+
+    //     user.tickets_purchased_total_bps += tickets_purchased_bps;
+    //     self.set_user(user_address, user);
+
+    //     let ticket_count_total = self.ticket_count_total_bps_pointer().get_value::<u128>();
+    //     self.ticket_count_total_bps_pointer().set_value(ticket_count_total + tickets_purchased_bps);
+
+    //     Ok((tickets_purchased_bps, used_amount))
+    // }
+
+    // // LP Deposit function
+    // fn lp_deposit(&self, risk_percentage: u128) -> Result<CallResponse> {
+    //     if risk_percentage == 0 || risk_percentage > 100 {
+    //         return Err(anyhow!("Invalid risk percentage"));
+    //     }
+        
+    //     if self.jackpot_lock_pointer().get_value::<u128>() != 0 {
+    //         return Err(anyhow!("Jackpot is currently running!"));
+    //     }
+
+    //     let context = self.context()?;
+    //     let token_id = self.token_id()?;
+        
+    //     // Calculate actual received amount
+    //     let balance_before = self.get_token_balance(&context.myself, &token_id);
+    //     let incoming_balance: u128 = context.incoming_alkanes.0.iter()
+    //         .filter(|t| t.id == token_id)
+    //         .map(|t| t.value)
+    //         .sum();
+    //     let balance_after = balance_before + incoming_balance;
+    //     let actual_received = balance_after - balance_before;
+        
+    //     if actual_received == 0 {
+    //         return Err(anyhow!("Invalid deposit amount, must be positive"));
+    //     }
+
+    //     let ticket_price = self.ticket_price();
+    //     let floored_value = (actual_received / ticket_price) * ticket_price;
+        
+    //     let mut lp = self.get_lp(&context.caller);
+    //     let is_new_lp = !lp.active;
+        
+    //     if is_new_lp {
+    //         let active_lps = self.get_active_lp_addresses();
+    //         let lp_limit = self.lp_limit_pointer().get_value::<u128>();
+    //         if active_lps.len() as u128 >= lp_limit {
+    //             return Err(anyhow!("Max LP limit reached"));
+    //         }
+            
+    //         let min_lp_deposit = self.min_lp_deposit_pointer().get_value::<u128>();
+    //         if floored_value < min_lp_deposit {
+    //             return Err(anyhow!("LP deposit less than minimum"));
+    //         }
+    //     }
+        
+    //     if floored_value < ticket_price {
+    //         return Err(anyhow!("Invalid deposit amount, must be greater than ticket price"));
+    //     }
+
+    //     let lp_pool_total = self.lp_pool_total_pointer().get_value::<u128>();
+    //     let lp_pool_cap = self.lp_pool_cap_pointer().get_value::<u128>();
+    //     if lp_pool_total + floored_value > lp_pool_cap {
+    //         return Err(anyhow!("Deposit exceeds LP pool cap"));
+    //     }
+
+    //     if is_new_lp {
+    //         lp.active = true;
+    //         let mut new_active = self.get_active_lp_addresses();
+    //         new_active.push(context.caller.clone());
+    //         self.set_active_lp_addresses(&new_active);
+    //     }
+
+    //     lp.principal += floored_value;
+    //     lp.risk_percentage = risk_percentage;
+    //     self.set_lp(&context.caller, lp);
+
+    //     let remainder = actual_received - floored_value;
+    //     let mut response = CallResponse::forward(&context.incoming_alkanes);
+    //     if remainder > 0 {
+    //         response.alkanes.pay(AlkaneTransfer {
+    //             id: token_id,
+    //             value: remainder,
+    //         });
+    //     }
+    //     Ok(response)
+    // }
+
+    // fn lp_adjust_risk_percentage(&self, risk_percentage: u128) -> Result<CallResponse> {
+    //     if risk_percentage == 0 || risk_percentage > 100 {
+    //         return Err(anyhow!("Invalid risk percentage"));
+    //     }
+    //     if self.jackpot_lock_pointer().get_value::<u128>() != 0 {
+    //         return Err(anyhow!("Jackpot is currently running!"));
+    //     }
+
+    //     let context = self.context()?;
+    //     let mut lp = self.get_lp(&context.caller);
+    //     if !lp.active {
+    //         return Err(anyhow!("LP is not active"));
+    //     }
+
+    //     lp.risk_percentage = risk_percentage;
+    //     self.set_lp(&context.caller, lp);
+
+    //     Ok(CallResponse::forward(&context.incoming_alkanes))
+    // }
+
+    // fn purchase_tickets(&self) -> Result<CallResponse> {
+    //     if self.allow_purchasing_pointer().get_value::<u128>() == 0 {
+    //         return Err(anyhow!("Purchasing tickets not allowed"));
+    //     }
+        
+    //     if self.jackpot_lock_pointer().get_value::<u128>() != 0 {
+    //         return Err(anyhow!("Jackpot is currently running!"));
+    //     }
+
+    //     let context = self.context()?;
+    //     if let Some(ref ref_addr) = referrer {
+    //         if *ref_addr == context.caller {
+    //             return Err(anyhow!("Cannot refer yourself"));
+    //         }
+    //     }
+
+    //     let token_id = self.token_id()?;
+    //     let balance_before = self.get_token_balance(&context.myself, &token_id);
+    //     let incoming_balance: u128 = context.incoming_alkanes.0.iter()
+    //         .filter(|t| t.id == token_id)
+    //         .map(|t| t.value)
+    //         .sum();
+    //     let balance_after = balance_before + incoming_balance;
+    //     let actual_received = balance_after - balance_before;
+
+    //     if actual_received == 0 {
+    //         return Err(anyhow!("Invalid purchase amount, must be positive"));
+    //     }
+
+    //     let user_address = match recipient {
+    //         Some(addr) if addr != context.caller => addr,
+    //         _ => context.caller.clone(),
+    //     };
+
+    //     let (tickets_purchased_bps, used_amount) = self.process_ticket_purchase(actual_received, &user_address)?;
+
+    //     let (all_fee_amount, referral_fee_amount, lp_fee_amount) = self.calculate_fees(used_amount, referrer.as_ref());
+    //     self.update_fee_totals(all_fee_amount, referral_fee_amount, lp_fee_amount, referrer.as_ref());
+
+    //     let user_pool_total = self.user_pool_total_pointer().get_value::<u128>();
+    //     self.user_pool_total_pointer().set_value(user_pool_total + used_amount - all_fee_amount);
+
+    //     let remainder = actual_received - used_amount;
+    //     let mut response = CallResponse::forward(&context.incoming_alkanes);
+    //     if remainder > 0 {
+    //         response.alkanes.pay(AlkaneTransfer {
+    //             id: token_id,
+    //             value: remainder,
+    //         });
+    //     }
+    //     Ok(response)
+    // }
+
+    // // Convert block hash to u128 for modulo operations
+    // fn block_hash_to_u128(&self) -> Result<u128> {
+    //     let block_header = self.block_header()?;
+    //     let block_hash = block_header.block_hash();
+    //     // Take first 16 bytes of block hash as u128
+    //     // BlockHash in bitcoin crate can be converted to byte array
+    //     let hash_bytes = block_hash.as_byte_array();
+    //     Ok(u128::from_le_bytes([
+    //         hash_bytes[0], hash_bytes[1], hash_bytes[2], hash_bytes[3],
+    //         hash_bytes[4], hash_bytes[5], hash_bytes[6], hash_bytes[7],
+    //         hash_bytes[8], hash_bytes[9], hash_bytes[10], hash_bytes[11],
+    //         hash_bytes[12], hash_bytes[13], hash_bytes[14], hash_bytes[15],
+    //     ]))
+    // }
+
+    // fn get_winning_ticket(&self, max: u128) -> Result<u128> {
+    //     let random_value = self.block_hash_to_u128()?;
+    //     Ok((random_value % max) + 1)
+    // }
+
+    // fn find_winner_from_users(&self, winning_ticket: u128) -> AlkaneId {
+    //     let active_users = self.get_active_user_addresses();
+    //     let mut cumulative_tickets_bps = 0u128;
+    //     for user_address in active_users {
+    //         let user = self.get_user(&user_address);
+    //         cumulative_tickets_bps += user.tickets_purchased_total_bps;
+    //         if winning_ticket <= cumulative_tickets_bps {
+    //             return user_address;
+    //         }
+    //     }
+    //     // No winner found, return fallback winner
+    //     let ptr = self.fallback_winner_pointer().get();
+    //     if ptr.len() >= 32 {
+    //         let block = u128::from_le_bytes(ptr[0..16].try_into().unwrap_or([0u8; 16]));
+    //         let tx = u128::from_le_bytes(ptr[16..32].try_into().unwrap_or([0u8; 16]));
+    //         AlkaneId::new(block, tx)
+    //     } else {
+    //         self.context().unwrap().myself
+    //     }
+    // }
+
+    // fn distribute_lp_fees_to_lps(&self) {
+    //     let lp_pool_total = self.lp_pool_total_pointer().get_value::<u128>();
+    //     let lp_fees_total = self.lp_fees_total_pointer().get_value::<u128>();
+        
+    //     if lp_pool_total == 0 {
+    //         // If no LPs have staked, distribute LP fees to the user pool
+    //         let user_pool = self.user_pool_total_pointer().get_value::<u128>();
+    //         self.user_pool_total_pointer().set_value(user_pool + lp_fees_total);
+    //         self.lp_fees_total_pointer().set_value(0);
+    //         return;
+    //     }
+
+    //     // Check protocol fee
+    //     let protocol_fee_address_ptr = self.protocol_fee_address_pointer().get();
+    //     let protocol_fee_threshold = self.protocol_fee_threshold_pointer().get_value::<u128>();
+    //     let mut lp_fees_remaining = lp_fees_total;
+        
+    //     if !protocol_fee_address_ptr.is_empty() && lp_fees_total >= protocol_fee_threshold {
+    //         let protocol_fee = lp_fees_total / 10;
+    //         lp_fees_remaining -= protocol_fee;
+    //         let current = self.protocol_fee_claimable_pointer().get_value::<u128>();
+    //         self.protocol_fee_claimable_pointer().set_value(current + protocol_fee);
+    //     }
+
+    //     let token_decimals = self.token_decimals_pointer().get_value::<u128>();
+    //     let decimals_multiplier = 10u128.pow(token_decimals as u32);
+    //     let mut total_distributed = 0u128;
+
+    //     let active_lps = self.get_active_lp_addresses();
+    //     for lp_address in active_lps {
+    //         let mut lp = self.get_lp(&lp_address);
+    //         if lp.active {
+    //             // Calculate proportion of lp.stake to lpPoolTotal
+    //             let lp_fees_share = ((lp_fees_remaining * decimals_multiplier * lp.stake) / lp_pool_total) / decimals_multiplier;
+    //             lp.principal += lp_fees_share;
+    //             total_distributed += lp_fees_share;
+    //             self.set_lp(&lp_address, lp);
+    //         }
+    //     }
+
+    //     self.lp_fees_total_pointer().set_value(lp_fees_remaining - total_distributed);
+    // }
+
+    // fn distribute_user_pool_to_lps(&self) {
+    //     let lp_pool_total = self.lp_pool_total_pointer().get_value::<u128>();
+    //     if lp_pool_total == 0 {
+    //         return;
+    //     }
+
+    //     let user_pool_total = self.user_pool_total_pointer().get_value::<u128>();
+    //     let token_decimals = self.token_decimals_pointer().get_value::<u128>();
+    //     let decimals_multiplier = 10u128.pow(token_decimals as u32);
+
+    //     let active_lps = self.get_active_lp_addresses();
+    //     for lp_address in active_lps {
+    //         let mut lp = self.get_lp(&lp_address);
+    //         if lp.active {
+    //             let user_pool_share = ((user_pool_total * decimals_multiplier * lp.stake) / lp_pool_total) / decimals_multiplier;
+    //             lp.principal += user_pool_share;
+    //             self.set_lp(&lp_address, lp);
+    //         }
+    //     }
+    // }
+
+    // fn return_lp_pool_back_to_lps(&self) {
+    //     let active_lps = self.get_active_lp_addresses();
+    //     for lp_address in active_lps {
+    //         let mut lp = self.get_lp(&lp_address);
+    //         if lp.active {
+    //             lp.principal += lp.stake;
+    //             lp.stake = 0;
+    //             self.set_lp(&lp_address, lp);
+    //         }
+    //     }
+    // }
+
+    // fn stake_lps(&self) {
+    //     let active_lps = self.get_active_lp_addresses();
+    //     let mut lp_pool_total = 0u128;
+        
+    //     for lp_address in active_lps.clone() {
+    //         let mut lp = self.get_lp(&lp_address);
+    //         if lp.active {
+    //             let principal = lp.principal;
+    //             let stake = (principal * lp.risk_percentage) / 100;
+    //             lp.stake = stake;
+    //             lp_pool_total += stake;
+    //             lp.principal = principal - stake;
+    //             self.set_lp(&lp_address, lp);
+    //         }
+    //     }
+        
+    //     self.lp_pool_total_pointer().set_value(lp_pool_total);
+    // }
+
+    // fn clear_user_ticket_purchases(&self) {
+    //     let active_users = self.get_active_user_addresses();
+    //     for user_address in &active_users {
+    //         let mut user = self.get_user(user_address);
+    //         user.tickets_purchased_total_bps = 0;
+    //         user.active = false;
+    //         self.set_user(user_address, user);
+    //     }
+    //     self.set_active_user_addresses(&Vec::new());
+    // }
+
+    // fn determine_winner_and_adjust_stakes(&self) -> Result<()> {
+    //     let current_time = self.block_timestamp()? as u128;
+    //     self.last_jackpot_end_time_pointer().set_value(current_time);
+
+    //     let ticket_count_total_bps = self.ticket_count_total_bps_pointer().get_value::<u128>();
+
+    //     // No tickets bought
+    //     if ticket_count_total_bps == 0 {
+    //         self.return_lp_pool_back_to_lps();
+    //         self.lp_pool_total_pointer().set_value(0);
+    //         self.stake_lps();
+    //         return Ok(());
+    //     }
+
+    //     // Distribute LP fees to LP's
+    //     self.distribute_lp_fees_to_lps();
+
+    //     let user_pool_total = self.user_pool_total_pointer().get_value::<u128>();
+    //     let lp_pool_total = self.lp_pool_total_pointer().get_value::<u128>();
+    //     let ticket_price = self.ticket_price();
+
+    //     if user_pool_total >= lp_pool_total {
+    //         // Jackpot is fully funded by users
+    //         let winning_ticket = self.get_winning_ticket(ticket_count_total_bps)?;
+    //         let winner_address = self.find_winner_from_users(winning_ticket);
+    //         self.last_winner_address_pointer().set(Arc::new(winner_address.into()));
+            
+    //         let win_amount = user_pool_total;
+    //         let mut winner = self.get_user(&winner_address);
+    //         winner.winnings_claimable += win_amount;
+    //         self.set_user(&winner_address, winner);
+            
+    //         self.return_lp_pool_back_to_lps();
+    //     } else {
+    //         // Jackpot is partially funded by LP's
+    //         let total_tickets = (lp_pool_total * 10000) / ticket_price;
+    //         let winning_ticket = self.get_winning_ticket(total_tickets)?;
+            
+    //         if winning_ticket <= ticket_count_total_bps {
+    //             // Won by a user
+    //             let winner_address = self.find_winner_from_users(winning_ticket);
+    //             self.last_winner_address_pointer().set(Arc::new(winner_address.into()));
+                
+    //             let win_amount = lp_pool_total;
+    //             let mut winner = self.get_user(&winner_address);
+    //             winner.winnings_claimable += win_amount;
+    //             self.set_user(&winner_address, winner);
+                
+    //             self.distribute_user_pool_to_lps();
+    //         } else {
+    //             // Won by LP's
+    //             self.last_winner_address_pointer().set(Arc::new(AlkaneId::default().into()));
+    //             self.distribute_user_pool_to_lps();
+    //             self.return_lp_pool_back_to_lps();
+    //         }
+    //     }
+
+    //     // Reset for next round
+    //     self.clear_user_ticket_purchases();
+    //     self.user_pool_total_pointer().set_value(0);
+    //     self.lp_pool_total_pointer().set_value(0);
+    //     self.ticket_count_total_bps_pointer().set_value(0);
+    //     self.all_fees_total_pointer().set_value(0);
+    //     self.referral_fees_total_pointer().set_value(0);
+        
+    //     // Stake the LP's
+    //     self.stake_lps();
+        
+    //     Ok(())
+    // }
+
+    // fn run_jackpot(&self) -> Result<CallResponse> {
+    //     let current_time = self.block_timestamp()? as u128;
+    //     let last_jackpot_end_time = self.last_jackpot_end_time_pointer().get_value::<u128>();
+    //     let round_duration = self.round_duration_in_seconds_pointer().get_value::<u128>();
+
+    //     if current_time < last_jackpot_end_time + round_duration {
+    //         return Err(anyhow!("Jackpot can only be run once per round"));
+    //     }
+
+    //     if self.jackpot_lock_pointer().get_value::<u128>() != 0 {
+    //         return Err(anyhow!("Jackpot is currently running!"));
+    //     }
+
+    //     // Acquire jackpot lock
+    //     self.jackpot_lock_pointer().set_value(1u128);
+
+    //     // Use block hash as entropy source (instead of Pyth oracle)
+    //     self.determine_winner_and_adjust_stakes()?;
+
+    //     // Release jackpot lock
+    //     self.jackpot_lock_pointer().set_value(0u128);
+
+    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    // }
+
+    // fn withdraw_winnings(&self) -> Result<CallResponse> {
+    //     let context = self.context()?;
+    //     let mut user = self.get_user(&context.caller);
+
+    //     if user.winnings_claimable == 0 {
+    //         return Err(anyhow!("No winnings to withdraw"));
+    //     }
+
+    //     let transfer_amount = user.winnings_claimable;
+    //     user.winnings_claimable = 0;
+    //     self.set_user(&context.caller, user);
+
+    //     let token_id = self.token_id()?;
+    //     self.transfer_tokens(&context.caller, &token_id, transfer_amount)
+    // }
+
+    // fn withdraw_referral_fees(&self) -> Result<CallResponse> {
+    //     let context = self.context()?;
+    //     let claimable = self.get_referral_fees_claimable(&context.caller);
+
+    //     if claimable == 0 {
+    //         return Err(anyhow!("No referral fees to withdraw"));
+    //     }
+
+    //     self.set_referral_fees_claimable(&context.caller, 0);
+
+    //     let token_id = self.token_id()?;
+    //     self.transfer_tokens(&context.caller, &token_id, claimable)
+    // }
+
+    // fn withdraw_protocol_fees(&self) -> Result<CallResponse> {
+    //     self.only_owner()?;
+        
+    //     let protocol_fee_claimable = self.protocol_fee_claimable_pointer().get_value::<u128>();
+    //     if protocol_fee_claimable == 0 {
+    //         return Err(anyhow!("No protocol fees to withdraw"));
+    //     }
+
+    //     self.protocol_fee_claimable_pointer().set_value(0);
+
+    //     let protocol_fee_address_ptr = self.protocol_fee_address_pointer().get();
+    //     if protocol_fee_address_ptr.is_empty() {
+    //         return Err(anyhow!("Protocol fee address not set"));
+    //     }
+
+    //     let block = u128::from_le_bytes(protocol_fee_address_ptr[0..16].try_into().unwrap_or([0u8; 16]));
+    //     let tx = u128::from_le_bytes(protocol_fee_address_ptr[16..32].try_into().unwrap_or([0u8; 16]));
+    //     let protocol_fee_address = AlkaneId::new(block, tx);
+
+    //     let token_id = self.token_id()?;
+    //     self.transfer_tokens(&protocol_fee_address, &token_id, protocol_fee_claimable)
+    // }
+
+    // fn withdraw_all_lp(&self) -> Result<CallResponse> {
+    //     let context = self.context()?;
+    //     let mut lp = self.get_lp(&context.caller);
+
+    //     if !lp.active {
+    //         return Err(anyhow!("LP is not active"));
+    //     }
+
+    //     // If they have stake, set risk to 0
+    //     if lp.stake > 0 {
+    //         lp.risk_percentage = 0;
+    //         self.set_lp(&context.caller, lp);
+    //         return Ok(CallResponse::forward(&context.incoming_alkanes));
+    //     }
+
+    //     // LP has 0 stake, proceed with withdrawal
+    //     let principal_amount = lp.principal;
+    //     lp.risk_percentage = 0;
+    //     lp.principal = 0;
+    //     lp.active = false;
+    //     self.set_lp(&context.caller, lp);
+
+    //     // Remove from active LP addresses
+    //     let mut active_lps = self.get_active_lp_addresses();
+    //     let lp_index = active_lps.iter().position(|addr| *addr == context.caller);
+    //     if let Some(idx) = lp_index {
+    //         active_lps.swap_remove(idx);
+    //         self.set_active_lp_addresses(&active_lps);
+    //     }
+
+    //     let token_id = self.token_id()?;
+    //     self.transfer_tokens(&context.caller, &token_id, principal_amount)
+    // }
+
+    // // Admin functions
+    // fn set_ticket_price(&self, new_price: u128) -> Result<CallResponse> {
+    //     self.only_owner()?;
+    //     self.ticket_price_pointer().set_value(new_price);
+    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    // }
+
+    // fn set_round_duration_in_seconds(&self, duration: u128) -> Result<CallResponse> {
+    //     self.only_owner()?;
+    //     self.round_duration_in_seconds_pointer().set_value(duration);
+    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    // }
+
+    // fn set_referral_fee_bps(&self, bps: u128) -> Result<CallResponse> {
+    //     self.only_owner()?;
+    //     let fee_bps = self.fee_bps_pointer().get_value::<u128>();
+    //     if bps > fee_bps {
+    //         return Err(anyhow!("Referral bps should not exceed fee bps"));
+    //     }
+    //     self.referral_fee_bps_pointer().set_value(bps);
+    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    // }
+
+    // fn set_fee_bps(&self, bps: u128) -> Result<CallResponse> {
+    //     self.only_owner()?;
+    //     if bps > 8000 {
+    //         return Err(anyhow!("Fee bps should not exceed 8000"));
+    //     }
+    //     let referral_bps = self.referral_fee_bps_pointer().get_value::<u128>();
+    //     if referral_bps + 500 > bps {
+    //         return Err(anyhow!("Referral bps should be less than fee bps by 500"));
+    //     }
+    //     self.fee_bps_pointer().set_value(bps);
+    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    // }
+
+    // fn set_lp_pool_cap(&self, cap: u128) -> Result<CallResponse> {
+    //     self.only_owner()?;
+    //     self.lp_pool_cap_pointer().set_value(cap);
+    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    // }
+
+    // fn set_protocol_fee_address(&self, address: AlkaneId) -> Result<CallResponse> {
+    //     self.only_owner()?;
+    //     self.protocol_fee_address_pointer().set(Arc::new(address.into()));
+    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    // }
+
+    // fn set_protocol_fee_threshold(&self, threshold: u128) -> Result<CallResponse> {
+    //     self.only_owner()?;
+    //     self.protocol_fee_threshold_pointer().set_value(threshold);
+    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    // }
+
+    // fn force_release_jackpot_lock(&self) -> Result<CallResponse> {
+    //     self.only_owner()?;
+    //     self.jackpot_lock_pointer().set_value(0u128);
+    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    // }
+
+    // fn set_fallback_winner(&self, winner: AlkaneId) -> Result<CallResponse> {
+    //     self.only_owner()?;
+    //     self.fallback_winner_pointer().set(Arc::new(winner.into()));
+    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    // }
+
+    // fn set_lp_limit(&self, limit: u128) -> Result<CallResponse> {
+    //     self.only_owner()?;
+    //     self.lp_limit_pointer().set_value(limit);
+    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    // }
+
+    // fn set_user_limit(&self, limit: u128) -> Result<CallResponse> {
+    //     self.only_owner()?;
+    //     self.user_limit_pointer().set_value(limit);
+    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    // }
+
+    // fn set_min_lp_deposit(&self, min_deposit: u128) -> Result<CallResponse> {
+    //     self.only_owner()?;
+    //     self.min_lp_deposit_pointer().set_value(min_deposit);
+    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    // }
+
+    // fn set_allow_purchasing(&self, allow: bool) -> Result<CallResponse> {
+    //     self.only_owner()?;
+    //     self.allow_purchasing_pointer().set_value(if allow { 1 } else { 0 });
+    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    // }
+
+    // fn deactivate_inactive_lps(&self, lp_addresses: Vec<AlkaneId>) -> Result<CallResponse> {
+    //     self.only_owner()?;
+    //     let mut active_lps = self.get_active_lp_addresses();
+        
+    //     for lp_address in lp_addresses {
+    //         let lp = self.get_lp(&lp_address);
+    //         if !lp.active {
+    //             continue;
+    //         }
+    //         if lp.risk_percentage != 0 || lp.stake != 0 {
+    //             continue;
+    //         }
+
+    //         let lp_index = active_lps.iter().position(|addr| *addr == lp_address);
+    //         if let Some(idx) = lp_index {
+    //             active_lps.swap_remove(idx);
+    //             let mut deactivated_lp = lp;
+    //             deactivated_lp.active = false;
+                
+    //             if deactivated_lp.principal > 0 {
+    //                 let principal_amount = deactivated_lp.principal;
+    //                 deactivated_lp.principal = 0;
+    //                 self.set_lp(&lp_address, deactivated_lp);
+                    
+    //                 let token_id = self.token_id()?;
+    //                 let _ = self.transfer_tokens(&lp_address, &token_id, principal_amount);
+    //             } else {
+    //                 self.set_lp(&lp_address, deactivated_lp);
+    //             }
+    //         }
+    //     }
+        
+    //     self.set_active_lp_addresses(&active_lps);
+    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    // }
+
+    fn get_name(&self) -> Result<CallResponse> {
+        let context = self.context()?;
+        let mut response: CallResponse = CallResponse::forward(&context.incoming_alkanes);
+        response.data = self.name().into_bytes().to_vec();
+        Ok(response)
+    }
+
+    fn forward_incoming(&self) -> Result<CallResponse> {
+        Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    }
+}
+
+declare_alkane! {
+    impl AlkaneResponder for LotteryContract {
+        type Message = LotteryContractMessage;
+    }
+}

@@ -17,6 +17,7 @@ members = ["alkanes/*", '.']
 [workspace.dependencies]
 alkanes-support = { git = "https://github.com/kungfuflex/alkanes-rs"}
 alkanes-runtime = { git = "https://github.com/kungfuflex/alkanes-rs" }
+alkanes-macros = { git = "https://github.com/kungfuflex/alkanes-rs", branch = "hude/storage_macros" }
 alkanes-std-factory-support = { git = "https://github.com/kungfuflex/alkanes-rs" }
 metashrew-support = { git = "https://github.com/sandshrewmetaprotocols/metashrew" }
 protorune-support = { git = "https://github.com/kungfuflex/alkanes-rs" }
