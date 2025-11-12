@@ -2,6 +2,7 @@ use alkanes_runtime::{
     declare_alkane, message::MessageDispatch, runtime::AlkaneResponder, storage::StoragePointer,
 };
 
+use alkanes_macros::{mapping_variable, storage_variable};
 #[allow(unused_imports)]
 use alkanes_runtime::{
     println,
@@ -24,7 +25,6 @@ use metashrew_support::{index_pointer::KeyValuePointer, utils::consume_u128};
 use protorune_support::balance_sheet::{BalanceSheetOperations, CachedBalanceSheet};
 use protorune_support::utils::consensus_decode;
 use std::{cmp::min, sync::Arc};
-use alkanes_macros::{storage_variable, mapping_variable};
 
 // User struct matching Solidity version
 #[derive(Clone, Default)]
@@ -40,13 +40,11 @@ impl User {
             return User::default();
         }
         let mut offset = 0;
-        let tickets_purchased_total_bps = u128::from_le_bytes(
-            v[offset..offset + 16].try_into().unwrap_or([0u8; 16])
-        );
+        let tickets_purchased_total_bps =
+            u128::from_le_bytes(v[offset..offset + 16].try_into().unwrap_or([0u8; 16]));
         offset += 16;
-        let winnings_claimable = u128::from_le_bytes(
-            v[offset..offset + 16].try_into().unwrap_or([0u8; 16])
-        );
+        let winnings_claimable =
+            u128::from_le_bytes(v[offset..offset + 16].try_into().unwrap_or([0u8; 16]));
         offset += 16;
         let active = v.get(offset).copied().unwrap_or(0) != 0;
         User {
@@ -92,17 +90,12 @@ impl LP {
             return LP::default();
         }
         let mut offset = 0;
-        let principal = u128::from_le_bytes(
-            v[offset..offset + 16].try_into().unwrap_or([0u8; 16])
-        );
+        let principal = u128::from_le_bytes(v[offset..offset + 16].try_into().unwrap_or([0u8; 16]));
         offset += 16;
-        let stake = u128::from_le_bytes(
-            v[offset..offset + 16].try_into().unwrap_or([0u8; 16])
-        );
+        let stake = u128::from_le_bytes(v[offset..offset + 16].try_into().unwrap_or([0u8; 16]));
         offset += 16;
-        let risk_percentage = u128::from_le_bytes(
-            v[offset..offset + 16].try_into().unwrap_or([0u8; 16])
-        );
+        let risk_percentage =
+            u128::from_le_bytes(v[offset..offset + 16].try_into().unwrap_or([0u8; 16]));
         offset += 16;
         let active = v.get(offset).copied().unwrap_or(0) != 0;
         LP {
@@ -159,7 +152,7 @@ pub enum LotteryContractMessage {
     // WithdrawProtocolFees,
     // #[opcode(8)]
     // WithdrawAllLP,
-    
+
     // // Admin functions
     // #[opcode(20)]
     // SetTicketPrice { new_price: u128 },
@@ -351,9 +344,9 @@ impl LotteryContract {
         let context = self.context()?;
         self.set_token(token_id.clone());
         self.set_name_and_symbol_str("Lottery LP".to_string(), "LTY LP".to_string());
-        
+
         self.set_ticket_price(ticket_price);
-        
+
         // Initialize default values
         self.set_fee_bps(10u128); // 0.1%
         self.set_round_duration_in_blocks(144u128); // 1 day
@@ -361,11 +354,11 @@ impl LotteryContract {
         self.set_user_limit(1500u128);
         self.set_allow_purchasing(0u128); // false
         self.set_last_jackpot_end_block(self.height() as u128);
-        
+
         let min_lp_deposit = ticket_price * 100;
         self.set_min_lp_deposit(min_lp_deposit);
         self.set_lp_pool_cap(min_lp_deposit * 1000);
-        
+
         Ok(CallResponse::forward(&context.incoming_alkanes))
     }
 
@@ -386,14 +379,14 @@ impl LotteryContract {
     // fn update_fee_totals(&self, all_fee_amount: u128, referral_fee_amount: u128, lp_fee_amount: u128, referrer: Option<&AlkaneId>) {
     //     let all_fees = self.all_fees_total_pointer().get_value::<u128>();
     //     self.all_fees_total_pointer().set_value(all_fees + all_fee_amount);
-        
+
     //     if let Some(ref_addr) = referrer {
     //         let current = self.get_referral_fees_claimable(ref_addr);
     //         self.set_referral_fees_claimable(ref_addr, current + referral_fee_amount);
     //         let total = self.referral_fees_total_pointer().get_value::<u128>();
     //         self.referral_fees_total_pointer().set_value(total + referral_fee_amount);
     //     }
-        
+
     //     let lp_fees = self.lp_fees_total_pointer().get_value::<u128>();
     //     self.lp_fees_total_pointer().set_value(lp_fees + lp_fee_amount);
     // }
@@ -436,14 +429,14 @@ impl LotteryContract {
     //     if risk_percentage == 0 || risk_percentage > 100 {
     //         return Err(anyhow!("Invalid risk percentage"));
     //     }
-        
+
     //     if self.jackpot_lock_pointer().get_value::<u128>() != 0 {
     //         return Err(anyhow!("Jackpot is currently running!"));
     //     }
 
     //     let context = self.context()?;
     //     let token_id = self.token_id()?;
-        
+
     //     // Calculate actual received amount
     //     let balance_before = self.get_token_balance(&context.myself, &token_id);
     //     let incoming_balance: u128 = context.incoming_alkanes.0.iter()
@@ -452,30 +445,30 @@ impl LotteryContract {
     //         .sum();
     //     let balance_after = balance_before + incoming_balance;
     //     let actual_received = balance_after - balance_before;
-        
+
     //     if actual_received == 0 {
     //         return Err(anyhow!("Invalid deposit amount, must be positive"));
     //     }
 
     //     let ticket_price = self.ticket_price();
     //     let floored_value = (actual_received / ticket_price) * ticket_price;
-        
+
     //     let mut lp = self.get_lp(&context.caller);
     //     let is_new_lp = !lp.active;
-        
+
     //     if is_new_lp {
     //         let active_lps = self.get_active_lp_addresses();
     //         let lp_limit = self.lp_limit_pointer().get_value::<u128>();
     //         if active_lps.len() as u128 >= lp_limit {
     //             return Err(anyhow!("Max LP limit reached"));
     //         }
-            
+
     //         let min_lp_deposit = self.min_lp_deposit_pointer().get_value::<u128>();
     //         if floored_value < min_lp_deposit {
     //             return Err(anyhow!("LP deposit less than minimum"));
     //         }
     //     }
-        
+
     //     if floored_value < ticket_price {
     //         return Err(anyhow!("Invalid deposit amount, must be greater than ticket price"));
     //     }
@@ -532,7 +525,7 @@ impl LotteryContract {
     //     if self.allow_purchasing_pointer().get_value::<u128>() == 0 {
     //         return Err(anyhow!("Purchasing tickets not allowed"));
     //     }
-        
+
     //     if self.jackpot_lock_pointer().get_value::<u128>() != 0 {
     //         return Err(anyhow!("Jackpot is currently running!"));
     //     }
@@ -625,7 +618,7 @@ impl LotteryContract {
     // fn distribute_lp_fees_to_lps(&self) {
     //     let lp_pool_total = self.lp_pool_total_pointer().get_value::<u128>();
     //     let lp_fees_total = self.lp_fees_total_pointer().get_value::<u128>();
-        
+
     //     if lp_pool_total == 0 {
     //         // If no LPs have staked, distribute LP fees to the user pool
     //         let user_pool = self.user_pool_total_pointer().get_value::<u128>();
@@ -638,7 +631,7 @@ impl LotteryContract {
     //     let protocol_fee_address_ptr = self.protocol_fee_address_pointer().get();
     //     let protocol_fee_threshold = self.protocol_fee_threshold_pointer().get_value::<u128>();
     //     let mut lp_fees_remaining = lp_fees_total;
-        
+
     //     if !protocol_fee_address_ptr.is_empty() && lp_fees_total >= protocol_fee_threshold {
     //         let protocol_fee = lp_fees_total / 10;
     //         lp_fees_remaining -= protocol_fee;
@@ -701,7 +694,7 @@ impl LotteryContract {
     // fn stake_lps(&self) {
     //     let active_lps = self.get_active_lp_addresses();
     //     let mut lp_pool_total = 0u128;
-        
+
     //     for lp_address in active_lps.clone() {
     //         let mut lp = self.get_lp(&lp_address);
     //         if lp.active {
@@ -713,7 +706,7 @@ impl LotteryContract {
     //             self.set_lp(&lp_address, lp);
     //         }
     //     }
-        
+
     //     self.lp_pool_total_pointer().set_value(lp_pool_total);
     // }
 
@@ -754,28 +747,28 @@ impl LotteryContract {
     //         let winning_ticket = self.get_winning_ticket(ticket_count_total_bps)?;
     //         let winner_address = self.find_winner_from_users(winning_ticket);
     //         self.last_winner_address_pointer().set(Arc::new(winner_address.into()));
-            
+
     //         let win_amount = user_pool_total;
     //         let mut winner = self.get_user(&winner_address);
     //         winner.winnings_claimable += win_amount;
     //         self.set_user(&winner_address, winner);
-            
+
     //         self.return_lp_pool_back_to_lps();
     //     } else {
     //         // Jackpot is partially funded by LP's
     //         let total_tickets = (lp_pool_total * 10000) / ticket_price;
     //         let winning_ticket = self.get_winning_ticket(total_tickets)?;
-            
+
     //         if winning_ticket <= ticket_count_total_bps {
     //             // Won by a user
     //             let winner_address = self.find_winner_from_users(winning_ticket);
     //             self.last_winner_address_pointer().set(Arc::new(winner_address.into()));
-                
+
     //             let win_amount = lp_pool_total;
     //             let mut winner = self.get_user(&winner_address);
     //             winner.winnings_claimable += win_amount;
     //             self.set_user(&winner_address, winner);
-                
+
     //             self.distribute_user_pool_to_lps();
     //         } else {
     //             // Won by LP's
@@ -792,10 +785,10 @@ impl LotteryContract {
     //     self.ticket_count_total_bps_pointer().set_value(0);
     //     self.all_fees_total_pointer().set_value(0);
     //     self.referral_fees_total_pointer().set_value(0);
-        
+
     //     // Stake the LP's
     //     self.stake_lps();
-        
+
     //     Ok(())
     // }
 
@@ -856,7 +849,7 @@ impl LotteryContract {
 
     // fn withdraw_protocol_fees(&self) -> Result<CallResponse> {
     //     self.only_owner()?;
-        
+
     //     let protocol_fee_claimable = self.protocol_fee_claimable_pointer().get_value::<u128>();
     //     if protocol_fee_claimable == 0 {
     //         return Err(anyhow!("No protocol fees to withdraw"));
@@ -1004,7 +997,7 @@ impl LotteryContract {
     // fn deactivate_inactive_lps(&self, lp_addresses: Vec<AlkaneId>) -> Result<CallResponse> {
     //     self.only_owner()?;
     //     let mut active_lps = self.get_active_lp_addresses();
-        
+
     //     for lp_address in lp_addresses {
     //         let lp = self.get_lp(&lp_address);
     //         if !lp.active {
@@ -1019,12 +1012,12 @@ impl LotteryContract {
     //             active_lps.swap_remove(idx);
     //             let mut deactivated_lp = lp;
     //             deactivated_lp.active = false;
-                
+
     //             if deactivated_lp.principal > 0 {
     //                 let principal_amount = deactivated_lp.principal;
     //                 deactivated_lp.principal = 0;
     //                 self.set_lp(&lp_address, deactivated_lp);
-                    
+
     //                 let token_id = self.token_id()?;
     //                 let _ = self.transfer_tokens(&lp_address, &token_id, principal_amount);
     //             } else {
@@ -1032,7 +1025,7 @@ impl LotteryContract {
     //             }
     //         }
     //     }
-        
+
     //     self.set_active_lp_addresses(&active_lps);
     //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
     // }
