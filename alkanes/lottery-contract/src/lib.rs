@@ -22,112 +22,10 @@ use anyhow::{anyhow, Result};
 use bitcoin::{Block, BlockHash};
 use metashrew_support::compat::to_arraybuffer_layout;
 use metashrew_support::{index_pointer::KeyValuePointer, utils::consume_u128};
+use oylswap_library::U256;
 use protorune_support::balance_sheet::{BalanceSheetOperations, CachedBalanceSheet};
 use protorune_support::utils::consensus_decode;
 use std::{cmp::min, sync::Arc};
-
-// User struct matching Solidity version
-#[derive(Clone, Default)]
-pub struct User {
-    pub tickets_purchased_total_bps: u128,
-    pub winnings_claimable: u128,
-    pub active: bool,
-}
-
-impl User {
-    fn from_bytes(v: Vec<u8>) -> Self {
-        if v.len() < 33 {
-            return User::default();
-        }
-        let mut offset = 0;
-        let tickets_purchased_total_bps =
-            u128::from_le_bytes(v[offset..offset + 16].try_into().unwrap_or([0u8; 16]));
-        offset += 16;
-        let winnings_claimable =
-            u128::from_le_bytes(v[offset..offset + 16].try_into().unwrap_or([0u8; 16]));
-        offset += 16;
-        let active = v.get(offset).copied().unwrap_or(0) != 0;
-        User {
-            tickets_purchased_total_bps,
-            winnings_claimable,
-            active,
-        }
-    }
-
-    fn try_to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&self.tickets_purchased_total_bps.to_le_bytes());
-        bytes.extend_from_slice(&self.winnings_claimable.to_le_bytes());
-        bytes.push(if self.active { 1 } else { 0 });
-        bytes
-    }
-
-    fn maximum() -> Self {
-        User {
-            tickets_purchased_total_bps: u128::MAX,
-            winnings_claimable: u128::MAX,
-            active: true,
-        }
-    }
-
-    fn zero() -> Self {
-        User::default()
-    }
-}
-
-// LP struct matching Solidity version
-#[derive(Clone, Default)]
-pub struct LP {
-    pub principal: u128,
-    pub stake: u128,
-    pub risk_percentage: u128,
-    pub active: bool,
-}
-
-impl LP {
-    fn from_bytes(v: Vec<u8>) -> Self {
-        if v.len() < 49 {
-            return LP::default();
-        }
-        let mut offset = 0;
-        let principal = u128::from_le_bytes(v[offset..offset + 16].try_into().unwrap_or([0u8; 16]));
-        offset += 16;
-        let stake = u128::from_le_bytes(v[offset..offset + 16].try_into().unwrap_or([0u8; 16]));
-        offset += 16;
-        let risk_percentage =
-            u128::from_le_bytes(v[offset..offset + 16].try_into().unwrap_or([0u8; 16]));
-        offset += 16;
-        let active = v.get(offset).copied().unwrap_or(0) != 0;
-        LP {
-            principal,
-            stake,
-            risk_percentage,
-            active,
-        }
-    }
-
-    fn try_to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&self.principal.to_le_bytes());
-        bytes.extend_from_slice(&self.stake.to_le_bytes());
-        bytes.extend_from_slice(&self.risk_percentage.to_le_bytes());
-        bytes.push(if self.active { 1 } else { 0 });
-        bytes
-    }
-
-    fn maximum() -> Self {
-        LP {
-            principal: u128::MAX,
-            stake: u128::MAX,
-            risk_percentage: 100,
-            active: true,
-        }
-    }
-
-    fn zero() -> Self {
-        LP::default()
-    }
-}
 
 #[derive(MessageDispatch)]
 pub enum LotteryContractMessage {
@@ -136,8 +34,8 @@ pub enum LotteryContractMessage {
         token_id: AlkaneId,
         ticket_price: u128, // price of single ticket in token
     },
-    // #[opcode(1)]
-    // LpDeposit { risk_percentage: u128 },
+    #[opcode(1)]
+    LpDeposit { amount_desired: u128 },
     // #[opcode(2)]
     // LpAdjustRiskPercentage { risk_percentage: u128 },
     // #[opcode(3)]
@@ -150,9 +48,8 @@ pub enum LotteryContractMessage {
     // WithdrawReferralFees,
     // #[opcode(7)]
     // WithdrawProtocolFees,
-    // #[opcode(8)]
-    // WithdrawAllLP,
-
+    #[opcode(8)]
+    LpWithdraw { amount_desired: u128 },
     // // Admin functions
     // #[opcode(20)]
     // SetTicketPrice { new_price: u128 },
@@ -291,53 +188,33 @@ impl LotteryContract {
     //     Ok(self.block_header()?.time)
     // }
 
-    // fn _refund_and_check_inputs(
-    //     &self,
-    //     desired_input_token: AlkaneId,
-    //     desired_input_amount: u128,
-    // ) -> Result<CallResponse> {
-    //     let context = self.context()?;
-    //     let mut token_received: u128 = 0;
-    //     let mut ret = CallResponse::default();
-    //     for alkane_transfer in context.incoming_alkanes.0.clone() {
-    //         if alkane_transfer.id != desired_input_token {
-    //             ret.alkanes.pay(alkane_transfer);
-    //         } else {
-    //             token_received += alkane_transfer.value;
-    //         }
-    //     }
-    //     if desired_input_amount > token_received {
-    //         return Err(anyhow!(format!(
-    //             "desired amount ({}) is greater than amount input ({})",
-    //             desired_input_amount, token_received
-    //         )));
-    //     }
-    //     ret.alkanes.pay(AlkaneTransfer {
-    //         id: desired_input_token,
-    //         value: token_received - desired_input_amount,
-    //     });
-    //     Ok(ret)
-    // }
-
-    // // Get token balance using BalanceSheetOperations
-    // fn get_token_balance(&self, address: &AlkaneId, token_id: &AlkaneId) -> u128 {
-    //     let context = match self.context() {
-    //         Ok(ctx) => ctx,
-    //         Err(_) => return 0,
-    //     };
-    //     let mut balance_sheet = CachedBalanceSheet::from_context(&context);
-    //     balance_sheet.get(&token_id.into())
-    // }
-
-    // // Transfer tokens
-    // fn transfer_tokens(&self, to: &AlkaneId, token_id: &AlkaneId, amount: u128) -> Result<CallResponse> {
-    //     let mut response = CallResponse::default();
-    //     response.alkanes.pay(AlkaneTransfer {
-    //         id: token_id.clone(),
-    //         value: amount,
-    //     });
-    //     Ok(response)
-    // }
+    fn _refund_and_check_inputs(
+        &self,
+        desired_input_token: AlkaneId,
+        desired_input_amount: u128,
+    ) -> Result<CallResponse> {
+        let context = self.context()?;
+        let mut token_received: u128 = 0;
+        let mut ret = CallResponse::default();
+        for alkane_transfer in context.incoming_alkanes.0.clone() {
+            if alkane_transfer.id != desired_input_token {
+                ret.alkanes.pay(alkane_transfer);
+            } else {
+                token_received += alkane_transfer.value;
+            }
+        }
+        if desired_input_amount > token_received {
+            return Err(anyhow!(format!(
+                "desired amount ({}) is greater than amount input ({})",
+                desired_input_amount, token_received
+            )));
+        }
+        ret.alkanes.pay(AlkaneTransfer {
+            id: desired_input_token,
+            value: token_received - desired_input_amount,
+        });
+        Ok(ret)
+    }
 
     fn initialize(&self, token_id: AlkaneId, ticket_price: u128) -> Result<CallResponse> {
         self.observe_initialization()?;
@@ -424,82 +301,82 @@ impl LotteryContract {
     //     Ok((tickets_purchased_bps, used_amount))
     // }
 
+    fn lottery_assets_before_transfer(&self) -> Result<u128> {
+        let context = self.context()?;
+        let lottery_token = self.token()?;
+        let current_assets = self.balance(&context.myself, &lottery_token);
+        let incoming_balance: u128 = context
+            .incoming_alkanes
+            .0
+            .iter()
+            .filter(|t| t.id == lottery_token)
+            .map(|t| t.value)
+            .sum();
+        Ok(current_assets - incoming_balance)
+    }
+
     // // LP Deposit function
-    // fn lp_deposit(&self, risk_percentage: u128) -> Result<CallResponse> {
-    //     if risk_percentage == 0 || risk_percentage > 100 {
-    //         return Err(anyhow!("Invalid risk percentage"));
-    //     }
+    fn lp_deposit(&self, amount_desired: u128) -> Result<CallResponse> {
+        if self.jackpot_lock() != 0 {
+            return Err(anyhow!("Jackpot is currently running!"));
+        }
 
-    //     if self.jackpot_lock_pointer().get_value::<u128>() != 0 {
-    //         return Err(anyhow!("Jackpot is currently running!"));
-    //     }
+        let context = self.context()?;
+        let lottery_token = self.token()?;
 
-    //     let context = self.context()?;
-    //     let token_id = self.token_id()?;
+        // Calculate actual received amount
+        let incoming_balance: u128 = context
+            .incoming_alkanes
+            .0
+            .iter()
+            .filter(|t| t.id == lottery_token)
+            .map(|t| t.value)
+            .sum();
+        let actual_received = incoming_balance;
 
-    //     // Calculate actual received amount
-    //     let balance_before = self.get_token_balance(&context.myself, &token_id);
-    //     let incoming_balance: u128 = context.incoming_alkanes.0.iter()
-    //         .filter(|t| t.id == token_id)
-    //         .map(|t| t.value)
-    //         .sum();
-    //     let balance_after = balance_before + incoming_balance;
-    //     let actual_received = balance_after - balance_before;
+        if actual_received == 0 || actual_received > amount_desired {
+            return Err(anyhow!(
+                "Invalid deposit amount, must be greater than amount_desired and nonzero"
+            ));
+        }
+        let true_amount_desired = if amount_desired == 0 {
+            actual_received
+        } else {
+            amount_desired
+        };
 
-    //     if actual_received == 0 {
-    //         return Err(anyhow!("Invalid deposit amount, must be positive"));
-    //     }
+        let ticket_price = self.ticket_price();
+        let floored_value = (true_amount_desired / ticket_price) * ticket_price;
 
-    //     let ticket_price = self.ticket_price();
-    //     let floored_value = (actual_received / ticket_price) * ticket_price;
+        if floored_value == 0 {
+            return Err(anyhow!(
+                "Invalid deposit amount, must be greater than ticket price"
+            ));
+        }
 
-    //     let mut lp = self.get_lp(&context.caller);
-    //     let is_new_lp = !lp.active;
+        let lp_pool_total = self.lp_pool_total();
+        let lp_pool_cap = self.lp_pool_cap();
+        if lp_pool_total + floored_value > lp_pool_cap {
+            return Err(anyhow!("Deposit exceeds LP pool cap"));
+        }
 
-    //     if is_new_lp {
-    //         let active_lps = self.get_active_lp_addresses();
-    //         let lp_limit = self.lp_limit_pointer().get_value::<u128>();
-    //         if active_lps.len() as u128 >= lp_limit {
-    //             return Err(anyhow!("Max LP limit reached"));
-    //         }
+        let total_shares = self.total_supply();
+        let current_assets = lp_pool_total;
+        let shares: u128 = if current_assets == 0 {
+            floored_value
+        } else {
+            (U256::from(floored_value) * U256::from(total_shares) / U256::from(current_assets))
+                .try_into()?
+        };
 
-    //         let min_lp_deposit = self.min_lp_deposit_pointer().get_value::<u128>();
-    //         if floored_value < min_lp_deposit {
-    //             return Err(anyhow!("LP deposit less than minimum"));
-    //         }
-    //     }
+        self.set_lp_pool_total(current_assets + floored_value);
 
-    //     if floored_value < ticket_price {
-    //         return Err(anyhow!("Invalid deposit amount, must be greater than ticket price"));
-    //     }
+        let shares_transfer = self.mint(&context, shares)?;
 
-    //     let lp_pool_total = self.lp_pool_total_pointer().get_value::<u128>();
-    //     let lp_pool_cap = self.lp_pool_cap_pointer().get_value::<u128>();
-    //     if lp_pool_total + floored_value > lp_pool_cap {
-    //         return Err(anyhow!("Deposit exceeds LP pool cap"));
-    //     }
-
-    //     if is_new_lp {
-    //         lp.active = true;
-    //         let mut new_active = self.get_active_lp_addresses();
-    //         new_active.push(context.caller.clone());
-    //         self.set_active_lp_addresses(&new_active);
-    //     }
-
-    //     lp.principal += floored_value;
-    //     lp.risk_percentage = risk_percentage;
-    //     self.set_lp(&context.caller, lp);
-
-    //     let remainder = actual_received - floored_value;
-    //     let mut response = CallResponse::forward(&context.incoming_alkanes);
-    //     if remainder > 0 {
-    //         response.alkanes.pay(AlkaneTransfer {
-    //             id: token_id,
-    //             value: remainder,
-    //         });
-    //     }
-    //     Ok(response)
-    // }
+        let mut response = self._refund_and_check_inputs(lottery_token, floored_value)?;
+        response.alkanes.pay(shares_transfer);
+        Ok(response)
+    }
 
     // fn lp_adjust_risk_percentage(&self, risk_percentage: u128) -> Result<CallResponse> {
     //     if risk_percentage == 0 || risk_percentage > 100 {
@@ -870,39 +747,64 @@ impl LotteryContract {
     //     self.transfer_tokens(&protocol_fee_address, &token_id, protocol_fee_claimable)
     // }
 
-    // fn withdraw_all_lp(&self) -> Result<CallResponse> {
-    //     let context = self.context()?;
-    //     let mut lp = self.get_lp(&context.caller);
+    fn lp_withdraw(&self, amount_desired: u128) -> Result<CallResponse> {
+        let context = self.context()?;
+        let token_id = self.token()?;
+        let vault_token = context.myself.clone();
+        let ticket_price = self.ticket_price();
 
-    //     if !lp.active {
-    //         return Err(anyhow!("LP is not active"));
-    //     }
+        let incoming_shares: u128 = context
+            .incoming_alkanes
+            .0
+            .iter()
+            .filter(|t| t.id == vault_token)
+            .map(|t| t.value)
+            .sum();
 
-    //     // If they have stake, set risk to 0
-    //     if lp.stake > 0 {
-    //         lp.risk_percentage = 0;
-    //         self.set_lp(&context.caller, lp);
-    //         return Ok(CallResponse::forward(&context.incoming_alkanes));
-    //     }
+        if incoming_shares == 0 || incoming_shares > amount_desired {
+            return Err(anyhow!("No shares provided for withdrawal, or amount_desired is greater than incoming shares"));
+        }
 
-    //     // LP has 0 stake, proceed with withdrawal
-    //     let principal_amount = lp.principal;
-    //     lp.risk_percentage = 0;
-    //     lp.principal = 0;
-    //     lp.active = false;
-    //     self.set_lp(&context.caller, lp);
+        let true_amount_desired = if amount_desired == 0 {
+            incoming_shares
+        } else {
+            amount_desired
+        };
 
-    //     // Remove from active LP addresses
-    //     let mut active_lps = self.get_active_lp_addresses();
-    //     let lp_index = active_lps.iter().position(|addr| *addr == context.caller);
-    //     if let Some(idx) = lp_index {
-    //         active_lps.swap_remove(idx);
-    //         self.set_active_lp_addresses(&active_lps);
-    //     }
+        if self.jackpot_lock() != 0 {
+            return Err(anyhow!("Jackpot is currently running!"));
+        }
 
-    //     let token_id = self.token_id()?;
-    //     self.transfer_tokens(&context.caller, &token_id, principal_amount)
-    // }
+        let total_shares = self.total_supply();
+        if total_shares < true_amount_desired {
+            return Err(anyhow!("Insufficient shares"));
+        }
+
+        let current_assets = self.lp_pool_total();
+        let amount_out = if total_shares == 0 {
+            0
+        } else {
+            (U256::from(true_amount_desired) * U256::from(current_assets)
+                / U256::from(total_shares))
+            .try_into()?
+        };
+
+        let floored_amount_out = (amount_out / ticket_price) * ticket_price;
+
+        if floored_amount_out > current_assets {
+            return Err(anyhow!("Insufficient assets"));
+        }
+
+        self.decrease_total_supply(true_amount_desired)?;
+        self.set_lp_pool_total(current_assets - floored_amount_out);
+
+        let mut response = self._refund_and_check_inputs(vault_token, true_amount_desired)?;
+        response.alkanes.pay(AlkaneTransfer {
+            id: token_id,
+            value: floored_amount_out,
+        });
+        Ok(response)
+    }
 
     // // Admin functions
     // fn set_ticket_price(&self, new_price: u128) -> Result<CallResponse> {
@@ -1018,7 +920,7 @@ impl LotteryContract {
     //                 deactivated_lp.principal = 0;
     //                 self.set_lp(&lp_address, deactivated_lp);
 
-    //                 let token_id = self.token_id()?;
+    //                 let token_id = self.token()?;
     //                 let _ = self.transfer_tokens(&lp_address, &token_id, principal_amount);
     //             } else {
     //                 self.set_lp(&lp_address, deactivated_lp);

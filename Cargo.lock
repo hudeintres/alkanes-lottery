@@ -1239,6 +1239,7 @@ dependencies = [
  "hex",
  "metashrew-support",
  "num",
+ "oylswap-library",
  "protorune-support",
  "ruint",
 ]
@@ -1421,6 +1422,23 @@ dependencies = [
  "serde",
  "serde_with",
  "thiserror",
+]
+
+[[package]]
+name = "oylswap-library"
+version = "0.1.0"
+source = "git+https://github.com/Oyl-Wallet/oyl-amm#bf9c4d7f5bb4caa69eaac9015212023e7f806ad8"
+dependencies = [
+ "alkanes-runtime",
+ "alkanes-std-factory-support",
+ "alkanes-support",
+ "anyhow",
+ "bitcoin 0.32.7",
+ "hex",
+ "metashrew-support",
+ "num",
+ "protorune-support",
+ "ruint",
 ]
 
 [[package]]
