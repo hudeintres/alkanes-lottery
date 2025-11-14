@@ -1,5 +1,6 @@
 use alkanes_runtime::{
-    declare_alkane, message::MessageDispatch, runtime::AlkaneResponder, storage::StoragePointer,
+    auth::AuthenticatedResponder, declare_alkane, message::MessageDispatch,
+    runtime::AlkaneResponder, storage::StoragePointer,
 };
 
 use alkanes_macros::{mapping_variable, storage_variable};
@@ -36,49 +37,41 @@ pub enum LotteryContractMessage {
     },
     #[opcode(1)]
     LpDeposit { amount_desired: u128 },
-    // #[opcode(2)]
-    // LpAdjustRiskPercentage { risk_percentage: u128 },
     // #[opcode(3)]
     // PurchaseTickets,
     // #[opcode(4)]
     // RunJackpot,
     // #[opcode(5)]
     // WithdrawWinnings,
-    // #[opcode(6)]
-    // WithdrawReferralFees,
     // #[opcode(7)]
     // WithdrawProtocolFees,
     #[opcode(8)]
     LpWithdraw { amount_desired: u128 },
-    // // Admin functions
-    // #[opcode(20)]
-    // SetTicketPrice { new_price: u128 },
-    // #[opcode(21)]
-    // SetRoundDurationInSeconds { duration: u128 },
-    // #[opcode(22)]
-    // SetReferralFeeBps { bps: u128 },
-    // #[opcode(23)]
-    // SetFeeBps { bps: u128 },
-    // #[opcode(24)]
-    // SetLpPoolCap { cap: u128 },
-    // #[opcode(25)]
-    // SetProtocolFee { fee: u128 },
-    // #[opcode(26)]
-    // SetProtocolFeeThreshold { threshold: u128 },
-    // #[opcode(27)]
-    // ForceReleaseJackpotLock,
-    // #[opcode(29)]
-    // SetLpLimit { limit: u128 },
-    // #[opcode(30)]
-    // SetUserLimit { limit: u128 },
-    // #[opcode(31)]
-    // SetMinLpDeposit { min_deposit: u128 },
-    // #[opcode(32)]
-    // SetAllowPurchasing { allow: bool },
+    // Admin functions
+    #[opcode(20)]
+    AdminSetTicketPrice { new_price: u128 },
+    #[opcode(21)]
+    AdminSetRoundDurationInBlocks { duration: u128 },
+    #[opcode(23)]
+    AdminSetFeeBps { bps: u128 },
+    #[opcode(24)]
+    AdminSetLpPoolCap { cap: u128 },
+    #[opcode(25)]
+    AdminSetProtocolFeeBps { bps: u128 },
+    #[opcode(27)]
+    AdminForceReleaseJackpotLock,
+    #[opcode(29)]
+    AdminSetLpLimit { limit: u128 },
+    #[opcode(30)]
+    AdminSetUserLimit { limit: u128 },
+    #[opcode(31)]
+    AdminSetMinLpDeposit { min_deposit: u128 },
+    #[opcode(32)]
+    AdminSetAllowPurchasing { allow: u128 },
 
-    // #[opcode(99)]
-    // #[returns(String)]
-    // GetName,
+    #[opcode(99)]
+    #[returns(String)]
+    GetName,
 }
 
 #[derive(Default)]
@@ -86,10 +79,12 @@ pub struct LotteryContract();
 
 impl MintableToken for LotteryContract {}
 impl AlkaneResponder for LotteryContract {}
+impl AuthenticatedResponder for LotteryContract {}
 
 impl LotteryContract {
     storage_variable!(token: AlkaneId);
     storage_variable!(fee_bps: u128);
+    storage_variable!(protocol_fee_bps: u128);
     storage_variable!(ticket_price: u128);
     storage_variable!(round_duration_in_blocks: u128);
     storage_variable!(last_jackpot_end_block: u128);
@@ -225,7 +220,8 @@ impl LotteryContract {
         self.set_ticket_price(ticket_price);
 
         // Initialize default values
-        self.set_fee_bps(10u128); // 0.1%
+        self.set_fee_bps(1500u128); // 15%
+        self.set_protocol_fee_bps(10u128); // 0.1%
         self.set_round_duration_in_blocks(144u128); // 1 day
         self.set_lp_limit(100u128);
         self.set_user_limit(1500u128);
@@ -377,26 +373,6 @@ impl LotteryContract {
         response.alkanes.pay(shares_transfer);
         Ok(response)
     }
-
-    // fn lp_adjust_risk_percentage(&self, risk_percentage: u128) -> Result<CallResponse> {
-    //     if risk_percentage == 0 || risk_percentage > 100 {
-    //         return Err(anyhow!("Invalid risk percentage"));
-    //     }
-    //     if self.jackpot_lock_pointer().get_value::<u128>() != 0 {
-    //         return Err(anyhow!("Jackpot is currently running!"));
-    //     }
-
-    //     let context = self.context()?;
-    //     let mut lp = self.get_lp(&context.caller);
-    //     if !lp.active {
-    //         return Err(anyhow!("LP is not active"));
-    //     }
-
-    //     lp.risk_percentage = risk_percentage;
-    //     self.set_lp(&context.caller, lp);
-
-    //     Ok(CallResponse::forward(&context.incoming_alkanes))
-    // }
 
     // fn purchase_tickets(&self) -> Result<CallResponse> {
     //     if self.allow_purchasing_pointer().get_value::<u128>() == 0 {
@@ -806,131 +782,69 @@ impl LotteryContract {
         Ok(response)
     }
 
-    // // Admin functions
-    // fn set_ticket_price(&self, new_price: u128) -> Result<CallResponse> {
-    //     self.only_owner()?;
-    //     self.ticket_price_pointer().set_value(new_price);
-    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
-    // }
+    // Admin functions
+    fn admin_set_ticket_price(&self, new_price: u128) -> Result<CallResponse> {
+        self.only_owner()?;
+        self.set_ticket_price(new_price);
+        Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    }
 
-    // fn set_round_duration_in_seconds(&self, duration: u128) -> Result<CallResponse> {
-    //     self.only_owner()?;
-    //     self.round_duration_in_seconds_pointer().set_value(duration);
-    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
-    // }
+    fn admin_set_round_duration_in_blocks(&self, duration: u128) -> Result<CallResponse> {
+        self.only_owner()?;
+        self.set_round_duration_in_blocks(duration);
+        Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    }
 
-    // fn set_referral_fee_bps(&self, bps: u128) -> Result<CallResponse> {
-    //     self.only_owner()?;
-    //     let fee_bps = self.fee_bps_pointer().get_value::<u128>();
-    //     if bps > fee_bps {
-    //         return Err(anyhow!("Referral bps should not exceed fee bps"));
-    //     }
-    //     self.referral_fee_bps_pointer().set_value(bps);
-    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
-    // }
+    fn admin_set_fee_bps(&self, bps: u128) -> Result<CallResponse> {
+        self.only_owner()?;
+        if bps > 8000 {
+            return Err(anyhow!("Fee bps should not exceed 8000"));
+        }
+        self.set_fee_bps(bps);
+        Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    }
 
-    // fn set_fee_bps(&self, bps: u128) -> Result<CallResponse> {
-    //     self.only_owner()?;
-    //     if bps > 8000 {
-    //         return Err(anyhow!("Fee bps should not exceed 8000"));
-    //     }
-    //     let referral_bps = self.referral_fee_bps_pointer().get_value::<u128>();
-    //     if referral_bps + 500 > bps {
-    //         return Err(anyhow!("Referral bps should be less than fee bps by 500"));
-    //     }
-    //     self.fee_bps_pointer().set_value(bps);
-    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
-    // }
+    fn admin_set_protocol_fee_bps(&self, bps: u128) -> Result<CallResponse> {
+        self.only_owner()?;
+        self.set_protocol_fee_bps(bps);
+        Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    }
 
-    // fn set_lp_pool_cap(&self, cap: u128) -> Result<CallResponse> {
-    //     self.only_owner()?;
-    //     self.lp_pool_cap_pointer().set_value(cap);
-    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
-    // }
+    fn admin_set_lp_pool_cap(&self, cap: u128) -> Result<CallResponse> {
+        self.only_owner()?;
+        self.set_lp_pool_cap(cap);
+        Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    }
 
-    // fn set_protocol_fee_address(&self, address: AlkaneId) -> Result<CallResponse> {
-    //     self.only_owner()?;
-    //     self.protocol_fee_address_pointer().set(Arc::new(address.into()));
-    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
-    // }
+    fn admin_force_release_jackpot_lock(&self) -> Result<CallResponse> {
+        self.only_owner()?;
+        self.set_jackpot_lock(0u128);
+        Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    }
 
-    // fn set_protocol_fee_threshold(&self, threshold: u128) -> Result<CallResponse> {
-    //     self.only_owner()?;
-    //     self.protocol_fee_threshold_pointer().set_value(threshold);
-    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
-    // }
+    fn admin_set_lp_limit(&self, limit: u128) -> Result<CallResponse> {
+        self.only_owner()?;
+        self.set_lp_limit(limit);
+        Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    }
 
-    // fn force_release_jackpot_lock(&self) -> Result<CallResponse> {
-    //     self.only_owner()?;
-    //     self.jackpot_lock_pointer().set_value(0u128);
-    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
-    // }
+    fn admin_set_user_limit(&self, limit: u128) -> Result<CallResponse> {
+        self.only_owner()?;
+        self.set_user_limit(limit);
+        Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    }
 
-    // fn set_fallback_winner(&self, winner: AlkaneId) -> Result<CallResponse> {
-    //     self.only_owner()?;
-    //     self.fallback_winner_pointer().set(Arc::new(winner.into()));
-    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
-    // }
+    fn admin_set_min_lp_deposit(&self, min_deposit: u128) -> Result<CallResponse> {
+        self.only_owner()?;
+        self.set_min_lp_deposit(min_deposit);
+        Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    }
 
-    // fn set_lp_limit(&self, limit: u128) -> Result<CallResponse> {
-    //     self.only_owner()?;
-    //     self.lp_limit_pointer().set_value(limit);
-    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
-    // }
-
-    // fn set_user_limit(&self, limit: u128) -> Result<CallResponse> {
-    //     self.only_owner()?;
-    //     self.user_limit_pointer().set_value(limit);
-    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
-    // }
-
-    // fn set_min_lp_deposit(&self, min_deposit: u128) -> Result<CallResponse> {
-    //     self.only_owner()?;
-    //     self.min_lp_deposit_pointer().set_value(min_deposit);
-    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
-    // }
-
-    // fn set_allow_purchasing(&self, allow: bool) -> Result<CallResponse> {
-    //     self.only_owner()?;
-    //     self.allow_purchasing_pointer().set_value(if allow { 1 } else { 0 });
-    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
-    // }
-
-    // fn deactivate_inactive_lps(&self, lp_addresses: Vec<AlkaneId>) -> Result<CallResponse> {
-    //     self.only_owner()?;
-    //     let mut active_lps = self.get_active_lp_addresses();
-
-    //     for lp_address in lp_addresses {
-    //         let lp = self.get_lp(&lp_address);
-    //         if !lp.active {
-    //             continue;
-    //         }
-    //         if lp.risk_percentage != 0 || lp.stake != 0 {
-    //             continue;
-    //         }
-
-    //         let lp_index = active_lps.iter().position(|addr| *addr == lp_address);
-    //         if let Some(idx) = lp_index {
-    //             active_lps.swap_remove(idx);
-    //             let mut deactivated_lp = lp;
-    //             deactivated_lp.active = false;
-
-    //             if deactivated_lp.principal > 0 {
-    //                 let principal_amount = deactivated_lp.principal;
-    //                 deactivated_lp.principal = 0;
-    //                 self.set_lp(&lp_address, deactivated_lp);
-
-    //                 let token_id = self.token()?;
-    //                 let _ = self.transfer_tokens(&lp_address, &token_id, principal_amount);
-    //             } else {
-    //                 self.set_lp(&lp_address, deactivated_lp);
-    //             }
-    //         }
-    //     }
-
-    //     self.set_active_lp_addresses(&active_lps);
-    //     Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
-    // }
+    fn admin_set_allow_purchasing(&self, allow: u128) -> Result<CallResponse> {
+        self.only_owner()?;
+        self.set_allow_purchasing(allow);
+        Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    }
 
     fn get_name(&self) -> Result<CallResponse> {
         let context = self.context()?;
