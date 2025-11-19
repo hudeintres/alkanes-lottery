@@ -34,6 +34,7 @@ pub enum LotteryContractMessage {
     Initialize {
         token_id: AlkaneId,
         ticket_price: u128, // price of single ticket in token
+        collector_factory_id: AlkaneId,
     },
     #[opcode(1)]
     LpDeposit { amount_desired: u128 },
@@ -101,6 +102,14 @@ impl LotteryContract {
     storage_variable!(min_lp_deposit: u128);
     storage_variable!(user_limit: u128);
     storage_variable!(allow_purchasing: u128);
+
+    storage_variable!(num_unique_ticket_collectors_for_round: u128);
+    mapping_variable!(ticket_collectors_for_round_list: (u128, AlkaneId, u128));
+
+    storage_variable!(collector_factory_id: AlkaneId);
+    storage_variable!(next_ticket_collector_id: u128);
+
+    mapping_variable!(reward_claimable_for_collector: (AlkaneId, u128));
 
     // Helper functions for User storage
     // mapping_variable!(User, "/user/");
@@ -211,13 +220,22 @@ impl LotteryContract {
         Ok(ret)
     }
 
-    fn initialize(&self, token_id: AlkaneId, ticket_price: u128) -> Result<CallResponse> {
+    fn initialize(
+        &self,
+        token_id: AlkaneId,
+        ticket_price: u128,
+        collector_factory_id: AlkaneId,
+    ) -> Result<CallResponse> {
         self.observe_initialization()?;
         let context = self.context()?;
         self.set_token(token_id.clone());
         self.set_name_and_symbol_str("Lottery LP".to_string(), "LTY LP".to_string());
 
         self.set_ticket_price(ticket_price);
+        self.set_collector_factory_id(collector_factory_id.clone());
+        self.set_next_ticket_collector_id(0u128);
+        self.set_num_unique_ticket_collectors_for_round(0u128);
+        self.set_ticket_count_total_bps(0u128);
 
         // Initialize default values
         self.set_fee_bps(1500u128); // 15%
