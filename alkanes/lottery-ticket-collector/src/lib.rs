@@ -23,7 +23,7 @@ pub enum LotteryTicketMessage {
     Initialize { ticket_id: u128 },
 
     #[opcode(50)]
-    ForwardIncoming,
+    Forward,
 
     #[opcode(99)]
     #[returns(String)]
@@ -54,7 +54,7 @@ impl LotteryTicket {
 
         Ok(response)
     }
-    fn forward_incoming(&self) -> Result<CallResponse> {
+    fn forward(&self) -> Result<CallResponse> {
         Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
     }
     fn get_name(&self) -> Result<CallResponse> {

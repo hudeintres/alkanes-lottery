@@ -70,6 +70,9 @@ pub enum LotteryContractMessage {
     #[opcode(32)]
     AdminSetAllowPurchasing { allow: u128 },
 
+    #[opcode(50)]
+    Forward,
+
     #[opcode(99)]
     #[returns(String)]
     GetName,
@@ -796,6 +799,10 @@ impl LotteryContract {
     }
 
     fn forward_incoming(&self) -> Result<CallResponse> {
+        Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    }
+
+    fn forward(&self) -> Result<CallResponse> {
         Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
     }
 }

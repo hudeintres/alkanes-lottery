@@ -1,5 +1,5 @@
 [package]
-name = "lottery-ticket"
+name = "lottery-ticket-collector"
 version = "0.1.0"
 edition = "2021"
 
