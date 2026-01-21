@@ -52,7 +52,7 @@ fn test_lp_multiple_deposits() -> Result<()> {
     let (init_block, mut runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
 
     // First LP deposit
-    let block_height_1 = 840_001;
+    let block_height_1 = 840_002;
     let input_outpoint_1 = OutPoint {
         txid: init_block.txdata.last().unwrap().compute_txid(),
         vout: 0,
@@ -69,11 +69,11 @@ fn test_lp_multiple_deposits() -> Result<()> {
     println!("LP1 deposited {:?}, received {:?} shares", deposit_amount_1, shares_1);
     assert_eq!(shares_1, deposit_amount_1, "First LP should receive shares equal to deposit");
 
-    // Second LP deposit
-    let block_height_2 = 840_002;
+    // Second LP deposit - use vout 2 for leftovers (remaining tokens)
+    let block_height_2 = 840_003;
     let input_outpoint_2 = OutPoint {
         txid: deposit_block_1.txdata.last().unwrap().compute_txid(),
-        vout: 0,
+        vout: 2, // Leftover tokens are at vout 2
     };
 
     let deposit_amount_2 = TICKET_PRICE * 20; // 2000 tokens
@@ -91,11 +91,11 @@ fn test_lp_multiple_deposits() -> Result<()> {
              deposit_amount_2, shares_2, expected_shares_2);
     assert_eq!(shares_2, expected_shares_2, "Second LP should receive proportional shares");
 
-    // Third LP deposit
-    let block_height_3 = 840_003;
+    // Third LP deposit - use vout 2 for leftovers
+    let block_height_3 = 840_004;
     let input_outpoint_3 = OutPoint {
         txid: deposit_block_2.txdata.last().unwrap().compute_txid(),
-        vout: 0,
+        vout: 2, // Leftover tokens are at vout 2
     };
 
     let deposit_amount_3 = TICKET_PRICE * 5; // 500 tokens
@@ -165,14 +165,16 @@ fn test_lp_deposit_and_full_withdraw() -> Result<()> {
 }
 
 /// Test multiple LPs deposit and withdraw to verify they get their proportional share back
+/// Note: This is a sequential test where one "user" does multiple deposits and then withdraws
+/// In a real scenario, each user would have their own UTXOs
 #[wasm_bindgen_test]
 fn test_multiple_lps_deposit_and_withdraw() -> Result<()> {
     alkane_helpers::clear();
 
     let (init_block, mut runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
 
-    // LP1 deposits
-    let block_height_1 = 840_001;
+    // First deposit
+    let block_height_1 = 840_002;
     let input_outpoint_1 = OutPoint {
         txid: init_block.txdata.last().unwrap().compute_txid(),
         vout: 0,
@@ -185,13 +187,19 @@ fn test_multiple_lps_deposit_and_withdraw() -> Result<()> {
         &deployment_ids,
         block_height_1,
     )?;
-    println!("LP1: deposited {:?}, received {:?} shares", deposit_amount_1, shares_1);
-
-    // LP2 deposits
-    let block_height_2 = 840_002;
-    let input_outpoint_2 = OutPoint {
+    println!("Deposit 1: deposited {:?}, received {:?} shares", deposit_amount_1, shares_1);
+    
+    // Track LP1's shares outpoint (vout 0 has shares)
+    let lp1_shares_outpoint = OutPoint {
         txid: deposit_block_1.txdata.last().unwrap().compute_txid(),
         vout: 0,
+    };
+
+    // Second deposit - use vout 2 for leftover tokens
+    let block_height_2 = 840_003;
+    let input_outpoint_2 = OutPoint {
+        txid: deposit_block_1.txdata.last().unwrap().compute_txid(),
+        vout: 2, // Leftover tokens are at vout 2
     };
 
     let deposit_amount_2 = TICKET_PRICE * 20;
@@ -201,49 +209,43 @@ fn test_multiple_lps_deposit_and_withdraw() -> Result<()> {
         &deployment_ids,
         block_height_2,
     )?;
-    println!("LP2: deposited {:?}, received {:?} shares", deposit_amount_2, shares_2);
+    println!("Deposit 2: deposited {:?}, received {:?} shares", deposit_amount_2, shares_2);
+    
+    // Track LP2's shares outpoint
+    let lp2_shares_outpoint = OutPoint {
+        txid: deposit_block_2.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
 
     // Total pool state
     let total_shares = shares_1 + shares_2;
     let total_pool = deposit_amount_1 + deposit_amount_2;
     println!("Total pool: {:?}, Total shares: {:?}", total_pool, total_shares);
 
-    // LP1 withdraws all their shares
-    let block_height_3 = 840_003;
-    let input_outpoint_3 = OutPoint {
-        txid: deposit_block_2.txdata.last().unwrap().compute_txid(),
-        vout: 0,
-    };
-
+    // Withdraw LP1's shares using LP1's shares outpoint
+    let block_height_3 = 840_004;
     let (withdraw_block_1, tokens_1) = do_lp_withdraw(
         shares_1,
-        input_outpoint_3,
+        lp1_shares_outpoint,
         &deployment_ids,
         block_height_3,
     )?;
 
     // LP1 should get back their proportional share
-    // tokens = (shares * pool_total) / total_shares
     let expected_tokens_1 = (shares_1 * total_pool) / total_shares;
     let floored_expected_1 = (expected_tokens_1 / TICKET_PRICE) * TICKET_PRICE;
-    println!("LP1: withdrew {:?} shares, received {:?} tokens (expected {:?})",
+    println!("Withdraw 1: withdrew {:?} shares, received {:?} tokens (expected {:?})",
              shares_1, tokens_1, floored_expected_1);
-    assert_eq!(tokens_1, floored_expected_1, "LP1 should receive proportional tokens");
+    assert_eq!(tokens_1, floored_expected_1, "First withdrawal should receive proportional tokens");
 
-    // LP2 withdraws all their shares
-    let block_height_4 = 840_004;
-    let input_outpoint_4 = OutPoint {
-        txid: withdraw_block_1.txdata.last().unwrap().compute_txid(),
-        vout: 0,
-    };
-
-    // After LP1 withdrawal, pool state changes
+    // Withdraw LP2's shares using LP2's shares outpoint
+    let block_height_4 = 840_005;
     let remaining_pool = total_pool - tokens_1;
     let remaining_shares = total_shares - shares_1;
 
     let (withdraw_block_2, tokens_2) = do_lp_withdraw(
         shares_2,
-        input_outpoint_4,
+        lp2_shares_outpoint,
         &deployment_ids,
         block_height_4,
     )?;
@@ -251,12 +253,11 @@ fn test_multiple_lps_deposit_and_withdraw() -> Result<()> {
     // LP2 should get back their proportional share of remaining pool
     let expected_tokens_2 = (shares_2 * remaining_pool) / remaining_shares;
     let floored_expected_2 = (expected_tokens_2 / TICKET_PRICE) * TICKET_PRICE;
-    println!("LP2: withdrew {:?} shares, received {:?} tokens (expected {:?})",
+    println!("Withdraw 2: withdrew {:?} shares, received {:?} tokens (expected {:?})",
              shares_2, tokens_2, floored_expected_2);
-    assert_eq!(tokens_2, floored_expected_2, "LP2 should receive proportional tokens");
+    assert_eq!(tokens_2, floored_expected_2, "Second withdrawal should receive proportional tokens");
 
-    // Verify both LPs got back approximately their initial deposits
-    // (may have small rounding differences due to flooring)
+    // Verify total withdrawn
     let total_withdrawn = tokens_1 + tokens_2;
     println!("Total deposited: {:?}, Total withdrawn: {:?}", total_pool, total_withdrawn);
     assert!(
@@ -346,7 +347,7 @@ fn test_lp_deposit_below_ticket_price_fails() -> Result<()> {
 
     let (init_block, mut runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
 
-    let block_height = 840_001;
+    let block_height = 840_002;
     let input_outpoint = OutPoint {
         txid: init_block.txdata.last().unwrap().compute_txid(),
         vout: 0,
@@ -367,10 +368,12 @@ fn test_lp_deposit_below_ticket_price_fails() -> Result<()> {
     index_block(&test_block, block_height)?;
 
     // Should revert with error about deposit being too small
+    // Use vout 5 which is where the protostone execution trace is recorded
+    // (vout 0 = main, vout 1 = op_return, vout 2 = leftovers, vout 3+ = virtual outputs)
     assert_revert_context(
         &OutPoint {
             txid: test_block.txdata.last().unwrap().compute_txid(),
-            vout: 0,
+            vout: 5,
         },
         "Invalid deposit amount",
     )?;
@@ -385,7 +388,7 @@ fn test_lp_deposit_exceeds_cap_fails() -> Result<()> {
 
     let (init_block, mut runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
 
-    let block_height = 840_001;
+    let block_height = 840_002;
     let input_outpoint = OutPoint {
         txid: init_block.txdata.last().unwrap().compute_txid(),
         vout: 0,
@@ -407,10 +410,11 @@ fn test_lp_deposit_exceeds_cap_fails() -> Result<()> {
     index_block(&test_block, block_height)?;
 
     // Should revert with error about exceeding cap
+    // Use vout 5 for the protostone execution trace
     assert_revert_context(
         &OutPoint {
             txid: test_block.txdata.last().unwrap().compute_txid(),
-            vout: 0,
+            vout: 5,
         },
         "Deposit exceeds LP pool cap",
     )?;

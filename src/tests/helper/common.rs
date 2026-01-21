@@ -25,6 +25,8 @@ pub struct LotteryTestDeploymentIds {
     pub lottery_token: AlkaneId,
     /// The collector factory for minting ticket collectors
     pub collector_factory: AlkaneId,
+    /// The auth token for the lottery contract (for admin functions)
+    pub lottery_auth_token: AlkaneId,
 }
 
 // Deployment tx constants
@@ -33,7 +35,8 @@ pub const LOTTERY_TOKEN_TX: u128 = 2;
 pub const COLLECTOR_FACTORY_TX: u128 = 3;
 
 /// Initial token amounts for testing
-pub const INIT_AMT_TOKEN: u128 = 100_000_000_000u128; // 1000 tokens with 8 decimals
+/// This needs to be large enough for multiple deposit/withdraw operations
+pub const INIT_AMT_TOKEN: u128 = 10_000_000_000_000u128; // 100000 tokens with 8 decimals
 
 pub fn create_deployment_ids() -> LotteryTestDeploymentIds {
     LotteryTestDeploymentIds {
@@ -48,6 +51,11 @@ pub fn create_deployment_ids() -> LotteryTestDeploymentIds {
         collector_factory: AlkaneId {
             block: 4,
             tx: COLLECTOR_FACTORY_TX,
+        },
+        // Auth token for lottery contract is at block 2 with same tx as the contract
+        lottery_auth_token: AlkaneId {
+            block: 2,
+            tx: LOTTERY_CONTRACT_TX,
         },
     }
 }
