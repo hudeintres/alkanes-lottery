@@ -56,7 +56,7 @@ pub fn create_deployment_ids() -> LotteryTestDeploymentIds {
         // Auth token for lottery contract is at block 2 with same tx as the contract
         lottery_auth_token: AlkaneId {
             block: 2,
-            tx: LOTTERY_CONTRACT_TX,
+            tx: 2,
         },
     }
 }

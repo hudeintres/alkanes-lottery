@@ -83,12 +83,17 @@ fn test_mint_and_buy_success() -> Result<()> {
     let sheet = get_last_outpoint_sheet(&purchase_block)?;
     let remaining_tokens = sheet.get(&deployment_ids.lottery_token.into());
     let collector_balance = sheet.get(&collector_id.into());
-    
+
     println!("Remaining tokens after purchase: {}", remaining_tokens);
     println!("Collector NFT balance: {}", collector_balance);
-    
+
     // User should have received the collector NFT
     assert_eq!(collector_balance, 1, "User should receive 1 collector NFT");
+
+    // Check user pool increased by the effective purchase amount
+    let (_view_block, user_pool_after) = call_get_user_pool_total(&deployment_ids, 840_003)?;
+    let expected_user_pool = (purchase_amount * 85) / 100; // 85% after 15% fee
+    assert_eq!(user_pool_after, expected_user_pool, "User pool should be purchase amount minus fees");
 
     Ok(())
 }
@@ -223,6 +228,25 @@ fn test_lottery_lps_win() -> Result<()> {
 
     println!("LP profit: {} tokens", tokens_received.saturating_sub(lp_deposit_amount));
 
+    // Step 5: Withdraw protocol fees - should be 0.1% of purchase amount
+    let block_height_5 = block_height_4 + 1;
+    let jackpot_outpoint_for_view = OutPoint {
+        txid: jackpot_block.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+    let protocol_fees_outpoint = jackpot_outpoint_for_view;
+
+    let (protocol_fees_block, protocol_fees_received) = do_withdraw_protocol_fees(
+        protocol_fees_outpoint,
+        &deployment_ids,
+        block_height_5,
+    )?;
+    println!("Withdrew protocol fees: {} tokens", protocol_fees_received);
+
+    // Assert the amount is 0.1% of purchase amount
+    let expected_protocol_fees = (purchase_amount * 1) / 1000; // 0.1%
+    assert_eq!(protocol_fees_received, expected_protocol_fees, "Protocol fees should be 0.1% of purchase amount");
+
     Ok(())
 }
 
@@ -328,13 +352,53 @@ fn test_lottery_user_wins() -> Result<()> {
     )?;
     println!("User withdrew winnings: {} tokens", winnings_received);
 
-    // User should receive their effective contribution as winnings
-    let expected_winnings = (purchase_amount * 85) / 100; // 85% after 15% fee
-    assert_eq!(winnings_received, expected_winnings, "User should receive their effective contribution as winnings");
+    // User should receive their effective contribution as winnings (the entire user pool)
+    assert_eq!(winnings_received, expected_user_pool, "User should receive the entire user pool amount as winnings");
+
+    // After withdrawing winnings, user pool should remain 0 (already distributed)
+    let (_withdraw_view_block, user_pool_after_withdraw) = call_get_user_pool_total(&deployment_ids, block_height_4 + 1)?;
+    assert_eq!(user_pool_after_withdraw, 0, "User pool should remain 0 after withdrawing winnings");
+
+    // Step 5: LP withdraws - should get 0 since LPs lost their stake to the user
+    let block_height_5 = block_height_4 + 1;
+    let lp_shares_outpoint = OutPoint {
+        txid: lp_deposit_block.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+
+    let (lp_withdraw_block, lp_payout) = do_lp_withdraw(
+        lp_shares,
+        lp_shares_outpoint,
+        &deployment_ids,
+        block_height_5,
+    )?;
+    println!("LP withdrew {} shares, received {} tokens", lp_shares, lp_payout);
+
+    // When user wins, LP gets 0 (loses their stake)
+    assert_eq!(lp_payout, 0, "LP should receive 0 tokens when user wins the jackpot");
 
     println!("In user wins scenario, user pool was larger than LP pool");
     println!("User's tickets fully funded the jackpot, so user wins the user pool");
     println!("User has collector {:?} to claim winnings", collector_id);
+
+    // Step 6: Withdraw protocol fees - should be 0.1% of purchase amount
+    let block_height_6 = block_height_5 + 1;
+    let jackpot_outpoint_for_view = OutPoint {
+        txid: jackpot_block.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+    let protocol_fees_outpoint = jackpot_outpoint_for_view;
+
+    let (protocol_fees_block, protocol_fees_received) = do_withdraw_protocol_fees(
+        protocol_fees_outpoint,
+        &deployment_ids,
+        block_height_6,
+    )?;
+    println!("Withdrew protocol fees: {} tokens", protocol_fees_received);
+
+    // Assert the amount is 0.1% of purchase amount
+    let expected_protocol_fees = (purchase_amount * 1) / 1000; // 0.1%
+    assert_eq!(protocol_fees_received, expected_protocol_fees, "Protocol fees should be 0.1% of purchase amount");
 
     Ok(())
 }
@@ -494,6 +558,11 @@ fn test_multiple_ticket_purchases() -> Result<()> {
     let total_purchased = purchase1_amount + purchase2_amount;
     println!("Total purchased: {} tokens ({} tickets)", total_purchased, total_purchased / TICKET_PRICE);
 
+    // Check that user pool reflects the total accumulated purchases
+    let (_view_block, user_pool_after) = call_get_user_pool_total(&deployment_ids, 840_005)?;
+    let expected_user_pool = (total_purchased * 85) / 100; // 85% after 15% fee
+    assert_eq!(user_pool_after, expected_user_pool, "User pool should reflect total purchase amount minus fees");
+
     Ok(())
 }
 
@@ -576,6 +645,114 @@ fn test_lp_payout_after_jackpot() -> Result<()> {
     // If LP won: LP gets deposit + user_pool + fees
     // If user won: LP gets user_pool + fees (loses their stake potentially)
     println!("LP result: {} tokens (original deposit: {})", lp_payout, lp_deposit_amount);
-    
+
+    Ok(())
+}
+
+/// Test withdrawing winnings when user has no winnings (should return 0)
+#[wasm_bindgen_test]
+fn test_withdraw_winnings_no_winnings() -> Result<()> {
+    alkane_helpers::clear();
+
+    let (init_block, _runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    // Purchasing is enabled during init
+
+    // Mint a collector but don't buy tickets
+    let block_height_1 = 840_002;
+    let mint_outpoint = OutPoint {
+        txid: init_block.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+
+    // Use mint_and_buy with 0 amount to just mint the collector
+    let purchase_amount = 0;
+
+    let (mint_block, collector_id) = do_mint_and_buy(
+        purchase_amount,
+        mint_outpoint,
+        &deployment_ids,
+        block_height_1,
+    )?;
+    println!("Minted collector {:?} with 0 purchase", collector_id);
+
+    // Try to withdraw winnings (should get 0)
+    let block_height_2 = 840_003;
+    let withdraw_outpoint = OutPoint {
+        txid: mint_block.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+
+    let (withdraw_block, winnings_received) = do_withdraw_winnings(
+        collector_id,
+        withdraw_outpoint,
+        &deployment_ids,
+        block_height_2,
+    )?;
+    println!("Withdrew winnings: {} tokens", winnings_received);
+
+    // Should receive 0 since no tickets were purchased
+    assert_eq!(winnings_received, 0, "Should receive 0 winnings when no tickets purchased");
+
+    Ok(())
+}
+
+/// Test running jackpot multiple times in the same round (should fail)
+#[wasm_bindgen_test]
+fn test_run_jackpot_twice_in_round_fails() -> Result<()> {
+    alkane_helpers::clear();
+
+    let (init_block, _runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+
+    // Step 1: LP deposits
+    let block_height_1 = 840_002;
+    let lp_deposit_outpoint = OutPoint {
+        txid: init_block.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+
+    let lp_deposit_amount = TICKET_PRICE * 100;
+    let (lp_deposit_block, _lp_shares) = do_lp_deposit(
+        lp_deposit_amount,
+        lp_deposit_outpoint,
+        &deployment_ids,
+        block_height_1,
+    )?;
+    println!("LP deposited {}", lp_deposit_amount);
+
+    // Step 2: Run jackpot after round duration
+    let block_height_2 = 840_002 + 145;
+    let jackpot_outpoint1 = OutPoint {
+        txid: lp_deposit_block.txdata.last().unwrap().compute_txid(),
+        vout: 2,
+    };
+
+    let jackpot_block1 = do_run_jackpot(jackpot_outpoint1, &deployment_ids, block_height_2)?;
+    println!("First jackpot run executed");
+
+    // Step 3: Try to run jackpot again in the same round (should fail)
+    let block_height_3 = block_height_2 + 1; // Still in same round
+    let jackpot_outpoint2 = OutPoint {
+        txid: jackpot_block1.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+
+    let mut test_block = create_block_with_coinbase_tx(block_height_3);
+    insert_run_jackpot_txs(
+        deployment_ids.lottery_contract,
+        &mut test_block,
+        jackpot_outpoint2,
+    );
+
+    index_block(&test_block, block_height_3)?;
+
+    // Should revert with error about round already processed
+    assert_revert_context(
+        &OutPoint {
+            txid: test_block.txdata.last().unwrap().compute_txid(),
+            vout: 4, // Different vout for single cellpack
+        },
+        "Jackpot can only be run once per round",
+    )?;
+
     Ok(())
 }

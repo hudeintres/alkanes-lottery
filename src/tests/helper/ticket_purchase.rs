@@ -173,6 +173,35 @@ pub fn do_withdraw_winnings(
     Ok((test_block, tokens))
 }
 
+/// Insert withdraw protocol fees transaction
+/// Requires sending the auth token to prove ownership
+pub fn insert_withdraw_protocol_fees_txs(
+    lottery_address: AlkaneId,
+    auth_token_id: AlkaneId,
+    test_block: &mut Block,
+    input_outpoint: OutPoint,
+) {
+    test_block.txdata.push(
+        create_multiple_cellpack_with_witness_and_in_with_edicts_and_leftovers(
+            Witness::new(),
+            vec![
+                CellpackOrEdict::Edict(vec![ProtostoneEdict {
+                    id: auth_token_id.into(),
+                    amount: 1,
+                    output: 0,
+                }]),
+                CellpackOrEdict::Cellpack(Cellpack {
+                    target: lottery_address,
+                    inputs: vec![7], // opcode 7 = WithdrawProtocolFees
+                }),
+            ],
+            input_outpoint,
+            false,
+            true, // separate leftovers
+        ),
+    );
+}
+
 /// Insert admin enable purchasing transaction
 /// Requires sending the auth token to prove ownership
 pub fn insert_admin_enable_purchasing_txs(
@@ -221,6 +250,30 @@ pub fn do_enable_purchasing(
     index_block(&test_block, block_height)?;
 
     Ok(test_block)
+}
+
+/// Withdraw protocol fees and return the block and tokens received
+pub fn do_withdraw_protocol_fees(
+    input_outpoint: OutPoint,
+    deployment_ids: &LotteryTestDeploymentIds,
+    block_height: u32,
+) -> Result<(Block, u128)> {
+    let mut test_block = create_block_with_coinbase_tx(block_height);
+
+    insert_withdraw_protocol_fees_txs(
+        deployment_ids.lottery_contract,
+        deployment_ids.lottery_auth_token,
+        &mut test_block,
+        input_outpoint,
+    );
+
+    index_block(&test_block, block_height)?;
+
+    // Get the tokens received from the output
+    let sheet = get_last_outpoint_sheet(&test_block)?;
+    let tokens = sheet.get_cached(&deployment_ids.lottery_token.into());
+
+    Ok((test_block, tokens))
 }
 
 /// Insert mint and buy transaction (mints collector + buys tickets in one operation)
