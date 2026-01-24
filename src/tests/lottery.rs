@@ -1,5 +1,5 @@
 use alkanes::indexer::index_block;
-use alkanes::tests::helpers::{self as alkane_helpers, assert_revert_context, get_last_outpoint_sheet};
+use alkanes::tests::helpers::{self as alkane_helpers, assert_return_context, assert_revert_context, get_last_outpoint_sheet};
 use alkanes_support::cellpack::Cellpack;
 use alkanes_support::id::AlkaneId;
 use anyhow::Result;
@@ -118,6 +118,16 @@ fn test_lottery_lps_win() -> Result<()> {
     println!("LP deposited {}, received {} shares", lp_deposit_amount, lp_shares);
     assert_eq!(lp_shares, lp_deposit_amount);
 
+    // Check LP pool after deposit using view function
+    let deposit_outpoint = OutPoint {
+        txid: lp_deposit_block.txdata.last().unwrap().compute_txid(),
+        vout: 2,
+    };
+    let (_deposit_view_block, lp_pool_after_deposit) = call_get_lp_pool_total(&deployment_ids, 840_003)?;
+    let (_deposit_view_block2, user_pool_after_deposit) = call_get_user_pool_total(&deployment_ids, 840_004)?;
+    assert_eq!(lp_pool_after_deposit, lp_deposit_amount, "LP pool should equal deposit amount after LP deposit");
+    assert_eq!(user_pool_after_deposit, 0, "User pool should still be 0 after LP deposit");
+
     // Step 2: User mints collector and buys tickets (small amount - less than LP pool)
     let block_height_2 = 840_003;
     let purchase_outpoint = OutPoint {
@@ -135,6 +145,17 @@ fn test_lottery_lps_win() -> Result<()> {
     )?;
     println!("User minted collector {:?} and purchased {} tokens worth of tickets", collector_id, purchase_amount);
 
+    // Check pools after user purchase using view functions
+    let purchase_outpoint_for_view = OutPoint {
+        txid: purchase_block.txdata.last().unwrap().compute_txid(),
+        vout: 2,
+    };
+    let (_purchase_view_block, lp_pool_after_purchase) = call_get_lp_pool_total(&deployment_ids, 840_004)?;
+    let (_purchase_view_block2, user_pool_after_purchase) = call_get_user_pool_total(&deployment_ids, 840_005)?;
+    assert_eq!(lp_pool_after_purchase, lp_deposit_amount, "LP pool should remain unchanged after user purchase");
+    let expected_user_pool = (purchase_amount * 85) / 100; // 85% after 15% fee
+    assert_eq!(user_pool_after_purchase, expected_user_pool, "User pool should be purchase amount minus fees");
+
     // Step 3: Wait for round duration and run jackpot
     // Round duration is 144 blocks by default
     let block_height_3 = 840_003 + 145; // After round duration
@@ -146,9 +167,24 @@ fn test_lottery_lps_win() -> Result<()> {
     let jackpot_block = do_run_jackpot(jackpot_outpoint, &deployment_ids, block_height_3)?;
     println!("Jackpot run executed");
 
+    // Check pools after jackpot using view functions (LPs win, so LP pool should increase by user pool + LP fees, user pool should be 0)
+    let jackpot_outpoint_for_view = OutPoint {
+        txid: jackpot_block.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+    let (_jackpot_view_block, lp_pool_after_jackpot) = call_get_lp_pool_total(&deployment_ids, block_height_3 + 1)?;
+    let (_jackpot_view_block2, user_pool_after_jackpot) = call_get_user_pool_total(&deployment_ids, block_height_3 + 2)?;
+
+    // LP fees (14.9% of purchase amount) are added to LP pool during jackpot
+    let lp_fees = (purchase_amount * 149) / 1000; // 14.9% = 149/1000
+    let expected_lp_pool_after_jackpot = lp_deposit_amount + expected_user_pool + lp_fees;
+
+    assert_eq!(lp_pool_after_jackpot, expected_lp_pool_after_jackpot, "LP pool should increase by user pool + LP fees after LPs win");
+    assert_eq!(user_pool_after_jackpot, 0, "User pool should be 0 after jackpot");
+
     // Step 4: LP withdraws - should get back their deposit plus the user's lost tickets
     let block_height_4 = block_height_3 + 1;
-    
+
     // LP shares are at lp_deposit_block vout 0
     let lp_shares_outpoint = OutPoint {
         txid: lp_deposit_block.txdata.last().unwrap().compute_txid(),
@@ -172,6 +208,17 @@ fn test_lottery_lps_win() -> Result<()> {
         "LP should receive at least their deposit back. Got {}, expected >= {}",
         tokens_received,
         lp_deposit_amount
+    );
+
+    // Additional check: LP should get their deposit plus the user's effective contribution
+    let user_effective_contribution = (purchase_amount * 85) / 100; // 85% after 15% fee
+    let expected_min_payout = lp_deposit_amount + user_effective_contribution;
+    // Allow some rounding difference due to ticket price flooring
+    assert!(
+        tokens_received >= expected_min_payout.saturating_sub(TICKET_PRICE),
+        "LP should receive at least their deposit + user's effective contribution. Got {}, expected >= {}",
+        tokens_received,
+        expected_min_payout.saturating_sub(TICKET_PRICE)
     );
 
     println!("LP profit: {} tokens", tokens_received.saturating_sub(lp_deposit_amount));
@@ -203,6 +250,16 @@ fn test_lottery_user_wins() -> Result<()> {
     )?;
     println!("LP deposited {}, received {} shares", lp_deposit_amount, lp_shares);
 
+    // Check LP pool after deposit using view function
+    let deposit_outpoint = OutPoint {
+        txid: lp_deposit_block.txdata.last().unwrap().compute_txid(),
+        vout: 2,
+    };
+    let (_deposit_view_block, lp_pool_after_deposit) = call_get_lp_pool_total(&deployment_ids, 840_003)?;
+    let (_deposit_view_block2, user_pool_after_deposit) = call_get_user_pool_total(&deployment_ids, 840_004)?;
+    assert_eq!(lp_pool_after_deposit, lp_deposit_amount, "LP pool should equal deposit amount after LP deposit");
+    assert_eq!(user_pool_after_deposit, 0, "User pool should still be 0 after LP deposit");
+
     // Step 2: User mints collector and buys LARGE amount of tickets (more than LP pool)
     let block_height_2 = 840_003;
     let purchase_outpoint = OutPoint {
@@ -220,6 +277,17 @@ fn test_lottery_user_wins() -> Result<()> {
     )?;
     println!("User minted collector {:?} and purchased {} tokens worth of tickets", collector_id, purchase_amount);
 
+    // Check pools after user purchase using view functions
+    let purchase_outpoint_for_view = OutPoint {
+        txid: purchase_block.txdata.last().unwrap().compute_txid(),
+        vout: 2,
+    };
+    let (_purchase_view_block, lp_pool_after_purchase) = call_get_lp_pool_total(&deployment_ids, 840_004)?;
+    let (_purchase_view_block2, user_pool_after_purchase) = call_get_user_pool_total(&deployment_ids, 840_005)?;
+    assert_eq!(lp_pool_after_purchase, lp_deposit_amount, "LP pool should remain unchanged after user purchase");
+    let expected_user_pool = (purchase_amount * 85) / 100; // 85% after 15% fee
+    assert_eq!(user_pool_after_purchase, expected_user_pool, "User pool should be purchase amount minus fees");
+
     // Step 3: Run jackpot after round duration
     let block_height_3 = 840_003 + 145;
     let jackpot_outpoint = OutPoint {
@@ -230,10 +298,40 @@ fn test_lottery_user_wins() -> Result<()> {
     let jackpot_block = do_run_jackpot(jackpot_outpoint, &deployment_ids, block_height_3)?;
     println!("Jackpot run executed");
 
+    // Check pools after jackpot using view functions (user wins, so user pool gets distributed and reset, LP pool should be 0)
+    let jackpot_outpoint_for_view = OutPoint {
+        txid: jackpot_block.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+    let (_jackpot_view_block, lp_pool_after_jackpot) = call_get_lp_pool_total(&deployment_ids, block_height_3 + 1)?;
+    let (_jackpot_view_block2, user_pool_after_jackpot) = call_get_user_pool_total(&deployment_ids, block_height_3 + 2)?;
+    assert_eq!(lp_pool_after_jackpot, 0, "LP pool should be 0 after user wins (LPs lose their stake)");
+    assert_eq!(user_pool_after_jackpot, 0, "User pool should be reset to 0 after jackpot (distributed to winner)");
+
     // When user pool >= LP pool, user is guaranteed to win
     // They win the user pool (minus fees)
     // Now we can test withdraw_winnings because we have the real collector NFT!
-    
+
+    // Step 4: User withdraws winnings
+    let block_height_4 = block_height_3 + 1;
+    // The collector NFT is at the purchase_block output (vout 0)
+    let withdraw_outpoint = OutPoint {
+        txid: purchase_block.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+
+    let (withdraw_block, winnings_received) = do_withdraw_winnings(
+        collector_id,
+        withdraw_outpoint,
+        &deployment_ids,
+        block_height_4,
+    )?;
+    println!("User withdrew winnings: {} tokens", winnings_received);
+
+    // User should receive their effective contribution as winnings
+    let expected_winnings = (purchase_amount * 85) / 100; // 85% after 15% fee
+    assert_eq!(winnings_received, expected_winnings, "User should receive their effective contribution as winnings");
+
     println!("In user wins scenario, user pool was larger than LP pool");
     println!("User's tickets fully funded the jackpot, so user wins the user pool");
     println!("User has collector {:?} to claim winnings", collector_id);
@@ -398,6 +496,7 @@ fn test_multiple_ticket_purchases() -> Result<()> {
 
     Ok(())
 }
+
 
 /// Test LP payout after user wins jackpot
 #[wasm_bindgen_test]

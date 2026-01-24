@@ -76,6 +76,12 @@ pub enum LotteryContractMessage {
     #[opcode(99)]
     #[returns(String)]
     GetName,
+    #[opcode(100)]
+    #[returns(u128)]
+    GetLpPoolTotal,
+    #[opcode(101)]
+    #[returns(u128)]
+    GetUserPoolTotal,
 }
 
 #[derive(Default)]
@@ -683,13 +689,15 @@ impl LotteryContract {
 
         // Determine winner
         if user_pool_total >= new_lp_pool_total {
-            // Jackpot fully funded by users - winner gets user pool
+            // Jackpot fully funded by users - winner gets user pool, LPs lose their stake
             let winning_ticket = self.get_winning_ticket(ticket_count_total_bps)?;
             if let Ok(winner_collector) = self.find_winner_collector(winning_ticket) {
                 let current_claimable = self.reward_claimable_for_collector(winner_collector.clone());
                 self.set_reward_claimable_for_collector(winner_collector.clone(), current_claimable + user_pool_total);
                 self.set_last_winner_id(winner_collector);
             }
+            // LPs lose their stake when jackpot is fully funded by users
+            self.set_lp_pool_total(0);
         } else {
             // Jackpot partially funded by LPs
             let total_tickets = (new_lp_pool_total * 10000) / ticket_price;
@@ -701,9 +709,9 @@ impl LotteryContract {
                     let current_claimable = self.reward_claimable_for_collector(winner_collector.clone());
                     self.set_reward_claimable_for_collector(winner_collector.clone(), current_claimable + new_lp_pool_total);
                     self.set_last_winner_id(winner_collector);
-                    
-                    // LPs get user pool
-                    self.set_lp_pool_total(new_lp_pool_total + user_pool_total);
+
+                    // LPs get user pool (LP pool becomes user pool)
+                    self.set_lp_pool_total(user_pool_total);
                 }
             } else {
                 // LPs win - get both pools
@@ -788,6 +796,22 @@ impl LotteryContract {
         let context = self.context()?;
         let mut response: CallResponse = CallResponse::forward(&context.incoming_alkanes);
         response.data = self.name().into_bytes().to_vec();
+        Ok(response)
+    }
+
+    fn get_lp_pool_total(&self) -> Result<CallResponse> {
+        let context = self.context()?;
+        let mut response: CallResponse = CallResponse::forward(&context.incoming_alkanes);
+        let lp_pool_total = self.lp_pool_total();
+        response.data = lp_pool_total.to_le_bytes().to_vec();
+        Ok(response)
+    }
+
+    fn get_user_pool_total(&self) -> Result<CallResponse> {
+        let context = self.context()?;
+        let mut response: CallResponse = CallResponse::forward(&context.incoming_alkanes);
+        let user_pool_total = self.user_pool_total();
+        response.data = user_pool_total.to_le_bytes().to_vec();
         Ok(response)
     }
 

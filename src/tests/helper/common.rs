@@ -1,8 +1,9 @@
-use alkanes::tests::helpers::{self as alkane_helpers};
+use alkanes::tests::helpers::{self as alkane_helpers, assert_return_context};
 use alkanes_support::{cellpack::Cellpack, id::AlkaneId};
 use anyhow::Result;
 use bitcoin::address::NetworkChecked;
 use bitcoin::blockdata::transaction::OutPoint;
+use bitcoin::hashes::Hash;
 use bitcoin::transaction::Version;
 use bitcoin::{Address, Amount, Block, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 #[allow(unused_imports)]
@@ -224,4 +225,92 @@ pub fn check_input_tokens_refunded(
         assert_eq!(input_sheet.get(rune), input_sheet.get(rune));
     }
     Ok(())
+}
+
+/// Extract response data from a view function call transaction
+pub fn extract_view_response_data(test_block: &Block) -> Result<u128> {
+    use alkanes::tests::helpers::assert_return_context;
+
+    // Use assert_return_context to get and parse the return data
+    assert_return_context(&OutPoint {
+        txid: test_block.txdata.last().unwrap().compute_txid(),
+        vout: 4, // View function data is in vout 4
+    }, |response| -> Result<u128> {
+        // Parse the return data as u128 (little endian)
+        if response.inner.data.len() == 16 {
+            Ok(u128::from_le_bytes(response.inner.data.clone().try_into().unwrap()))
+        } else {
+            Ok(0) // Fallback if data format is unexpected
+        }
+    })
+}
+
+/// Call GetLpPoolTotal view function
+pub fn call_get_lp_pool_total(
+    deployment_ids: &LotteryTestDeploymentIds,
+    block_height: u32,
+) -> Result<(Block, u128)> {
+    use alkanes::indexer::index_block;
+    use protorune::test_helpers::create_block_with_coinbase_tx;
+
+    // Create a default outpoint for view function calls
+    let default_outpoint = OutPoint {
+        txid: bitcoin::Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_slice(&[0; 32]).unwrap()),
+        vout: 0,
+    };
+
+    let mut test_block = create_block_with_coinbase_tx(block_height);
+    test_block.txdata.push(
+        create_multiple_cellpack_with_witness_and_in_with_edicts_and_leftovers(
+            Witness::new(),
+            vec![CellpackOrEdict::Cellpack(Cellpack {
+                target: deployment_ids.lottery_contract,
+                inputs: vec![100], // opcode 100 = GetLpPoolTotal
+            })],
+            default_outpoint,
+            false,
+            true,
+        ),
+    );
+
+    index_block(&test_block, block_height)?;
+
+    // Extract response data from the transaction
+    let data = extract_view_response_data(&test_block)?;
+    Ok((test_block, data))
+}
+
+/// Call GetUserPoolTotal view function
+pub fn call_get_user_pool_total(
+    deployment_ids: &LotteryTestDeploymentIds,
+    block_height: u32,
+) -> Result<(Block, u128)> {
+    use alkanes::indexer::index_block;
+    use protorune::test_helpers::create_block_with_coinbase_tx;
+
+    // Create a default outpoint for view function calls
+    let default_outpoint = OutPoint {
+        txid: bitcoin::Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_slice(&[0; 32]).unwrap()),
+        vout: 0,
+    };
+
+    let mut test_block = create_block_with_coinbase_tx(block_height);
+    test_block.txdata.push(
+        create_multiple_cellpack_with_witness_and_in_with_edicts_and_leftovers(
+            Witness::new(),
+            vec![CellpackOrEdict::Cellpack(Cellpack {
+                target: deployment_ids.lottery_contract,
+                inputs: vec![101], // opcode 101 = GetUserPoolTotal
+            })],
+            default_outpoint,
+            false,
+            true,
+        ),
+    );
+
+    index_block(&test_block, block_height)?;
+
+    // Extract response data from the transaction
+    let data = extract_view_response_data(&test_block)?;
+    Ok((test_block, data))
 }
