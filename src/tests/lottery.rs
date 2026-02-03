@@ -20,7 +20,7 @@ fn test_purchase_tickets_when_disabled_fails() -> Result<()> {
     alkane_helpers::clear();
 
     // Initialize with purchasing disabled
-    let (init_block, _runtime_balances, deployment_ids) = test_lottery_init_fixture_purchasing_disabled()?;
+    let (init_block, _runtime_balances, deployment_ids, _) = test_lottery_init_fixture_purchasing_disabled()?;
 
     // Try to purchase tickets when purchasing is disabled
     let block_height = 840_002;
@@ -59,7 +59,7 @@ fn test_purchase_tickets_when_disabled_fails() -> Result<()> {
 fn test_mint_and_buy_success() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, _runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    let (init_block, _runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
     // Purchasing is enabled during init
 
     // Mint and buy tickets in one operation
@@ -103,7 +103,7 @@ fn test_mint_and_buy_success() -> Result<()> {
 fn test_lottery_lps_win() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, _runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    let (init_block, _runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
     // Purchasing is enabled during init
 
     // Step 1: LP deposits to create the pool
@@ -187,6 +187,20 @@ fn test_lottery_lps_win() -> Result<()> {
     assert_eq!(lp_pool_after_jackpot, expected_lp_pool_after_jackpot, "LP pool should increase by user pool + LP fees after LPs win");
     assert_eq!(user_pool_after_jackpot, 0, "User pool should be 0 after jackpot");
 
+    // Test: user's collector cannot claim anything in case LPs win
+    let block_height_claim = block_height_3 + 3;
+    let claim_outpoint = OutPoint {
+        txid: purchase_block.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+    let (_claim_block, winnings_received) = do_withdraw_winnings(
+        collector_id,
+        claim_outpoint,
+        &deployment_ids,
+        block_height_claim,
+    )?;
+    assert_eq!(winnings_received, 0, "User's collector cannot claim anything in case the LPs win");
+
     // Step 4: LP withdraws - should get back their deposit plus the user's lost tickets
     let block_height_4 = block_height_3 + 1;
 
@@ -255,7 +269,8 @@ fn test_lottery_lps_win() -> Result<()> {
 fn test_lottery_user_wins() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, _runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    // Get init_block + different collector outpoint (standalone mint block; different from bought one)
+    let (init_block, _runtime_balances, deployment_ids, different_collector_outpoint) = test_lottery_init_fixture()?;
     // Purchasing is enabled during init
 
     // Step 1: LP deposits a small amount
@@ -332,12 +347,32 @@ fn test_lottery_user_wins() -> Result<()> {
     assert_eq!(lp_pool_after_jackpot, 0, "LP pool should be 0 after user wins (LPs lose their stake)");
     assert_eq!(user_pool_after_jackpot, 0, "User pool should be reset to 0 after jackpot (distributed to winner)");
 
+    // Test: different collector id than one that bought tickets cannot collect winnings
+    // (sends different NFT but specifies winner id -> ownership revert)
+    let block_height_bad = block_height_3 + 3;
+    let bad_outpoint = different_collector_outpoint;  // holds pre-minted different collector
+    let mut test_block = create_block_with_coinbase_tx(block_height_bad);
+    insert_withdraw_winnings_txs(
+        collector_id,  // winner id
+        deployment_ids.lottery_contract,
+        &mut test_block,
+        bad_outpoint,  // holds different collector
+    );
+    index_block(&test_block, block_height_bad)?;
+    assert_revert_context(
+        &OutPoint {
+            txid: test_block.txdata.last().unwrap().compute_txid(),
+            vout: 5,
+        },
+        "Must send collector NFT to prove ownership",
+    )?;
+
     // When user pool >= LP pool, user is guaranteed to win
     // They win the user pool (minus fees)
     // Now we can test withdraw_winnings because we have the real collector NFT!
 
     // Step 4: User withdraws winnings
-    let block_height_4 = block_height_3 + 1;
+    let block_height_4 = block_height_3 + 4;
     // The collector NFT is at the purchase_block output (vout 0)
     let withdraw_outpoint = OutPoint {
         txid: purchase_block.txdata.last().unwrap().compute_txid(),
@@ -408,7 +443,7 @@ fn test_lottery_user_wins() -> Result<()> {
 fn test_run_jackpot_too_early_fails() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, _runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    let (init_block, _runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
 
     // Try to run jackpot immediately (before round duration)
     let block_height = 840_002; // Too early
@@ -443,7 +478,7 @@ fn test_run_jackpot_too_early_fails() -> Result<()> {
 fn test_run_jackpot_no_tickets() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, _runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    let (init_block, _runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
 
     // Step 1: LP deposits
     let block_height_1 = 840_002;
@@ -500,7 +535,7 @@ fn test_run_jackpot_no_tickets() -> Result<()> {
 fn test_multiple_ticket_purchases() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, _runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    let (init_block, _runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
     // Purchasing is enabled during init
 
     // Step 1: LP deposits
@@ -572,7 +607,7 @@ fn test_multiple_ticket_purchases() -> Result<()> {
 fn test_lp_payout_after_jackpot() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, _runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    let (init_block, _runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
     // Purchasing is enabled during init
 
     // Step 1: LP deposits
@@ -654,7 +689,7 @@ fn test_lp_payout_after_jackpot() -> Result<()> {
 fn test_withdraw_winnings_no_winnings() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, _runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    let (init_block, _runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
     // Purchasing is enabled during init
 
     // Mint a collector but don't buy tickets
@@ -701,7 +736,7 @@ fn test_withdraw_winnings_no_winnings() -> Result<()> {
 fn test_run_jackpot_twice_in_round_fails() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, _runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    let (init_block, _runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
 
     // Step 1: LP deposits
     let block_height_1 = 840_002;
@@ -752,6 +787,79 @@ fn test_run_jackpot_twice_in_round_fails() -> Result<()> {
             vout: 4, // Different vout for single cellpack
         },
         "Jackpot can only be run once per round",
+    )?;
+
+    Ok(())
+}
+/// Test admin fee limit exceed and unauthorized admin (covers only_owner reverts for opcodes 20-32)
+#[wasm_bindgen_test]
+fn test_admin_fee_exceed_unauthorized_fails() -> Result<()> {
+    alkane_helpers::clear();
+
+    let (init_block, _runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
+
+    let block_height = 840_002;
+    // Use default outpoint to ensure no auth token incoming
+    let input_outpoint = OutPoint::default();
+
+    // Test several admin opcodes (20-32) without auth token - all should hit only_owner revert
+    for opcode in [20u128, 21, 23, 24, 25, 27, 29, 30, 31, 32] {
+        let mut test_block = create_block_with_coinbase_tx(block_height);
+        test_block.txdata.push(
+            create_multiple_cellpack_with_witness_and_in_with_edicts(
+                Witness::new(),
+                vec![CellpackOrEdict::Cellpack(Cellpack {
+                    target: deployment_ids.lottery_contract,
+                    inputs: vec![opcode, 0], // admin opcode + dummy arg
+                })],
+                input_outpoint,
+                false, // etch=false
+            ),
+        );
+
+        index_block(&test_block, block_height)?;
+
+        assert_revert_context(
+            &OutPoint {
+                txid: test_block.txdata.last().unwrap().compute_txid(),
+                vout: 3,
+            },
+            "Auth token is not in incoming alkanes",
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Test protocol fee withdraw with no fees (covers no fees revert)
+#[wasm_bindgen_test]
+fn test_withdraw_protocol_no_fees_fails() -> Result<()> {
+    alkane_helpers::clear();
+
+    let (init_block, _runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
+
+    let block_height = 840_002;
+    let protocol_outpoint = OutPoint {
+        txid: init_block.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+
+    let mut test_block = create_block_with_coinbase_tx(block_height);
+    insert_withdraw_protocol_fees_txs(
+        deployment_ids.lottery_contract,
+        deployment_ids.lottery_auth_token,
+        &mut test_block,
+        protocol_outpoint,
+    );
+
+    index_block(&test_block, block_height)?;
+
+    assert_revert_context(
+        &OutPoint {
+            txid: test_block.txdata.last().unwrap().compute_txid(),
+            vout: 5,
+        },
+        "No protocol fees to withdraw",
     )?;
 
     Ok(())

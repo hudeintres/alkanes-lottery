@@ -154,7 +154,7 @@ pub fn check_and_get_initial_runtime_balance(
 }
 
 /// Complete lottery setup fixture for tests (with purchasing enabled)
-pub fn test_lottery_init_fixture() -> Result<(Block, BalanceSheet<IndexPointer>, LotteryTestDeploymentIds)> {
+pub fn test_lottery_init_fixture() -> Result<(Block, BalanceSheet<IndexPointer>, LotteryTestDeploymentIds, OutPoint)> {
     let deployment_ids = create_deployment_ids();
 
     // Deploy contracts
@@ -169,17 +169,44 @@ pub fn test_lottery_init_fixture() -> Result<(Block, BalanceSheet<IndexPointer>,
     let init_block = init_lottery_config(previous_outpoint, &deployment_ids, true)?;
     println!("Lottery initialized (purchasing enabled)");
 
+    // Mint different collector using standalone new block (dummy outpoint, no previous output/tokens)
+    // Targets factory instance at block 6 to init/mint NFT (for unauthorized claim tests)
+    let mint_block_height = 840_002;
+    let mut mint_test_block = create_block_with_coinbase_tx(mint_block_height);
+    mint_test_block.txdata.push(
+        create_multiple_cellpack_with_witness_and_in(
+            Witness::new(),
+            vec![Cellpack {
+                target: AlkaneId {
+                    block: 6,
+                    tx: deployment_ids.collector_factory.tx,
+                },
+                inputs: vec![0, 999], // 0=Initialize, ticket_id=999
+            }],
+            // Dummy outpoint (no real input/previous output needed; OutPoint::default() works)
+            OutPoint::default(),
+            false,
+        ),
+    );
+    index_block(&mint_test_block, mint_block_height)?;
+
     // Verify deployments
     assert_contracts_correct_ids(&deployment_ids)?;
     check_initial_token_balance(&deploy_block, &deployment_ids)?;
 
     let runtime_balance = check_and_get_initial_runtime_balance(&deployment_ids)?;
 
-    Ok((init_block, runtime_balance, deployment_ids))
+    // different_collector_outpoint from the standalone mint block (vout 0 holds NFT)
+    let different_collector_outpoint = OutPoint {
+        txid: mint_test_block.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+
+    Ok((init_block, runtime_balance, deployment_ids, different_collector_outpoint))
 }
 
 /// Complete lottery setup fixture for tests with purchasing disabled
-pub fn test_lottery_init_fixture_purchasing_disabled() -> Result<(Block, BalanceSheet<IndexPointer>, LotteryTestDeploymentIds)> {
+pub fn test_lottery_init_fixture_purchasing_disabled() -> Result<(Block, BalanceSheet<IndexPointer>, LotteryTestDeploymentIds, OutPoint)> {
     let deployment_ids = create_deployment_ids();
 
     // Deploy contracts
@@ -194,11 +221,38 @@ pub fn test_lottery_init_fixture_purchasing_disabled() -> Result<(Block, Balance
     let init_block = init_lottery_config(previous_outpoint, &deployment_ids, false)?;
     println!("Lottery initialized (purchasing disabled)");
 
+    // Mint different collector using standalone new block (dummy outpoint, no previous output/tokens)
+    // Targets factory instance at block 6 to init/mint NFT (for unauthorized claim tests)
+    let mint_block_height = 840_002;
+    let mut mint_test_block = create_block_with_coinbase_tx(mint_block_height);
+    mint_test_block.txdata.push(
+        create_multiple_cellpack_with_witness_and_in(
+            Witness::new(),
+            vec![Cellpack {
+                target: AlkaneId {
+                    block: 6,
+                    tx: deployment_ids.collector_factory.tx,
+                },
+                inputs: vec![0, 999], // 0=Initialize, ticket_id=999
+            }],
+            // Dummy outpoint (no real input/previous output needed; OutPoint::default() works)
+            OutPoint::default(),
+            false,
+        ),
+    );
+    index_block(&mint_test_block, mint_block_height)?;
+
     // Verify deployments
     assert_contracts_correct_ids(&deployment_ids)?;
     check_initial_token_balance(&deploy_block, &deployment_ids)?;
 
     let runtime_balance = check_and_get_initial_runtime_balance(&deployment_ids)?;
 
-    Ok((init_block, runtime_balance, deployment_ids))
+    // different_collector_outpoint from the standalone mint block (vout 0 holds NFT)
+    let different_collector_outpoint = OutPoint {
+        txid: mint_test_block.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+
+    Ok((init_block, runtime_balance, deployment_ids, different_collector_outpoint))
 }

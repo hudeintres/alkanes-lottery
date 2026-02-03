@@ -19,7 +19,7 @@ use crate::tests::helper::*;
 fn test_lp_single_deposit() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, mut runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    let (init_block, mut runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
 
     let block_height = 840_001;
     let input_outpoint = OutPoint {
@@ -49,7 +49,7 @@ fn test_lp_single_deposit() -> Result<()> {
 fn test_lp_multiple_deposits() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, mut runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    let (init_block, mut runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
 
     // First LP deposit
     let block_height_1 = 840_002;
@@ -122,7 +122,7 @@ fn test_lp_multiple_deposits() -> Result<()> {
 fn test_lp_deposit_and_full_withdraw() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, mut runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    let (init_block, mut runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
 
     // Deposit
     let block_height_1 = 840_001;
@@ -171,7 +171,7 @@ fn test_lp_deposit_and_full_withdraw() -> Result<()> {
 fn test_multiple_lps_deposit_and_withdraw() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, mut runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    let (init_block, mut runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
 
     // First deposit
     let block_height_1 = 840_002;
@@ -273,7 +273,7 @@ fn test_multiple_lps_deposit_and_withdraw() -> Result<()> {
 fn test_lp_partial_withdraw() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, mut runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    let (init_block, mut runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
 
     // Deposit
     let block_height_1 = 840_001;
@@ -345,7 +345,7 @@ fn test_lp_partial_withdraw() -> Result<()> {
 fn test_lp_deposit_below_ticket_price_fails() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, mut runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    let (init_block, mut runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
 
     let block_height = 840_002;
     let input_outpoint = OutPoint {
@@ -386,7 +386,7 @@ fn test_lp_deposit_below_ticket_price_fails() -> Result<()> {
 fn test_lp_deposit_exceeds_cap_fails() -> Result<()> {
     alkane_helpers::clear();
 
-    let (init_block, mut runtime_balances, deployment_ids) = test_lottery_init_fixture()?;
+    let (init_block, mut runtime_balances, deployment_ids, _) = test_lottery_init_fixture()?;
 
     let block_height = 840_002;
     let input_outpoint = OutPoint {
